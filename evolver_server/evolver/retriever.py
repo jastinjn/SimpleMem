@@ -27,22 +27,22 @@ class MemoryRetriever:
         self.retrieval_mode = retrieval_mode
         self.embedder = embedder
 
-    def retrieve(self, query: MemoryQuery) -> list[MemorySearchHit]:
+    async def retrieve(self, query: MemoryQuery) -> list[MemorySearchHit]:
         mode = self.retrieval_mode
         if mode == "auto":
             mode = self._auto_select_mode(query)
             logger.info("[Retriever] auto-selected mode=%s for query(%d chars)", mode, len(query.query_text))
         if mode == "embedding":
-            hits = self._retrieve_embedding(query)
+            hits = await self._retrieve_embedding(query)
             logger.info("[Retriever] mode=embedding scope=%s hits=%d", query.scope_id, len(hits))
             return hits
         if mode == "hybrid":
-            hits = self._retrieve_hybrid(query)
+            hits = await self._retrieve_hybrid(query)
             logger.info("[Retriever] mode=hybrid scope=%s hits=%d", query.scope_id, len(hits))
             return hits
         # Try expanded query if direct keyword search yields too few results.
         limit = min(query.top_k, self.policy.max_injected_units)
-        hits = self.store.search_keyword(
+        hits = await self.store.search_keyword(
             query.user_id,
             query.scope_id,
             query_text=query.query_text,
@@ -53,7 +53,7 @@ class MemoryRetriever:
             expanded = _expand_query(query.query_text)
             if expanded != query.query_text:
                 expanded_flag = True
-                extra = self.store.search_keyword(
+                extra = await self.store.search_keyword(
                     query.user_id,
                     query.scope_id,
                     query_text=expanded,
@@ -92,12 +92,28 @@ class MemoryRetriever:
             return "hybrid"
         return "keyword"
 
-    def _retrieve_hybrid(self, query: MemoryQuery) -> list[MemorySearchHit]:
+    async def _retrieve_hybrid(self, query: MemoryQuery) -> list[MemorySearchHit]:
         query_terms = _tokenize(query.query_text)
         if not query_terms:
             return []
 
-        units = self.store.list_active(query.user_id, query.scope_id, limit=500)
+        limit = min(query.top_k * 4, 200)
+        query_embedding = self.embedder.encode(query.query_text) if self.embedder else []
+
+        # Source candidates from both keyword and (if available) vector search.
+        kw_hits = await self.store.search_keyword(
+            query.user_id, query.scope_id, query_text=query.query_text, limit=limit
+        )
+        kw_units = {h.unit.memory_id: h.unit for h in kw_hits}
+
+        if query_embedding:
+            vec_units = await self.store.search_vector(
+                query.user_id, query.scope_id, query_embedding=query_embedding, limit=limit
+            )
+            for u in vec_units:
+                kw_units.setdefault(u.memory_id, u)
+
+        units = list(kw_units.values())
         if not units:
             return []
 
@@ -116,7 +132,6 @@ class MemoryRetriever:
                     doc_freq[term] = doc_freq.get(term, 0) + 1
 
         num_docs = float(len(units))
-        query_embedding = self.embedder.encode(query.query_text) if self.embedder else []
         hits: list[MemorySearchHit] = []
         for idx, unit in enumerate(units):
             if query.include_types and unit.memory_type not in query.include_types:
@@ -128,8 +143,6 @@ class MemoryRetriever:
                 term for term in query_terms
                 if term in content_terms or term in metadata_terms
             )
-            if not matched:
-                continue
 
             # IDF-weighted keyword and metadata overlap.
             keyword_idf = sum(
@@ -157,7 +170,7 @@ class MemoryRetriever:
                 + self.policy.recency_weight * recency_bonus
                 + unit.reinforcement_score
             ) * type_boost * confidence_factor
-            reason_parts = [f"matched: {', '.join(matched[:5])}"]
+            reason_parts = [f"matched: {', '.join(matched[:5])}"] if matched else ["vector match"]
             if recency_bonus > 0.3:
                 reason_parts.append("recent")
             if unit.importance >= 0.8:
@@ -175,18 +188,19 @@ class MemoryRetriever:
             hits = _apply_tag_boost(hits, query.context_tags)
         return hits
 
-    def _retrieve_embedding(self, query: MemoryQuery) -> list[MemorySearchHit]:
+    async def _retrieve_embedding(self, query: MemoryQuery) -> list[MemorySearchHit]:
         if self.embedder is None:
             return []
         query_embedding = self.embedder.encode(query.query_text)
         if not query_embedding:
             return []
 
+        limit = min(query.top_k * 3, 100)
         hits: list[MemorySearchHit] = []
-        for unit in self.store.list_active(query.user_id, query.scope_id, limit=500):
+        for unit in await self.store.search_vector(
+            query.user_id, query.scope_id, query_embedding=query_embedding, limit=limit
+        ):
             if query.include_types and unit.memory_type not in query.include_types:
-                continue
-            if not unit.embedding:
                 continue
             similarity = cosine_similarity(query_embedding, unit.embedding)
             if similarity <= 0.0:

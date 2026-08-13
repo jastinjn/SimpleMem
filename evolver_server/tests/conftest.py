@@ -1,26 +1,19 @@
 # pyright: reportMissingImports=false
-"""Shared fixtures for the Evolver API test suite.
+"""API test fixtures.
 
-Every test gets a fresh isolated SQLite DB pre-seeded with the standard 6-unit
-corpus injected directly into scope ``"alice"`` for user ``"user-alice"``.
-
-Corpus summary:
-  unit-001  SEMANTIC          "The project uses PostgreSQL as the primary database"
-  unit-002  EPISODIC          "Alice and Bob discussed the authentication strategy for the API"
-  unit-003  PREFERENCE        "User prefers TypeScript over JavaScript for frontend development"
-  unit-004  PROJECT_STATE     "The deployment pipeline uses Kubernetes for container orchestration"
-  unit-005  PROCEDURAL_OBS    "Running tests requires the pytest framework with coverage enabled"
-  unit-006  SEMANTIC          "Redis is used for caching session tokens and rate limiting"
+DB scaffolding (test_engine, test_sm, _worker_schema, _clean_tables) lives in
+the root evolver_server/conftest.py and is inherited here automatically.
 """
 
 from __future__ import annotations
 
-import importlib
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 
-import pytest
-from fastapi.testclient import TestClient
-
-from evolver_server.evolver.tests.conftest import create_test_units  # noqa: E402
+from evolver_server.app import app
+from evolver_server.evolver.manager import MemoryManager
+from evolver_server.evolver.store import MemoryStore
+from evolver_server.evolver.tests.conftest import create_test_units
 
 USER_ID = "user-alice"
 SCOPE = "alice"
@@ -28,28 +21,47 @@ OTHER_SCOPE = "bob"
 CORPUS_SIZE = 6  # len(create_test_units())
 
 
-def _make_app(tmp_path, monkeypatch):
-    """Return a freshly reloaded app module pointed at an isolated DB."""
-    monkeypatch.setenv("EVOLVER_DB_PATH", str(tmp_path / "test.db"))
-    from evolver_server import config as config_mod
-    config_mod.get_settings.cache_clear()
-    return importlib.reload(importlib.import_module("evolver_server.app"))
+@pytest_asyncio.fixture()
+async def store(test_sm):
+    return MemoryStore(test_sm)
 
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    """TestClient backed by a fresh DB pre-seeded with the standard corpus."""
-    app_mod = _make_app(tmp_path, monkeypatch)
-    with TestClient(app_mod.app) as c:
-        app_mod.app.state.store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
-        yield c
+@pytest_asyncio.fixture()
+async def mgr(store):
+    return MemoryManager(store=store, retrieval_mode="keyword", auto_consolidate=False)
 
 
-@pytest.fixture()
-def client_and_store(tmp_path, monkeypatch):
-    """TestClient + direct MemoryStore access for asserting DB state after writes."""
-    app_mod = _make_app(tmp_path, monkeypatch)
-    with TestClient(app_mod.app) as c:
-        store = app_mod.app.state.store
-        store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
-        yield c, store
+@pytest_asyncio.fixture()
+async def seeded_store(store):
+    """Store pre-seeded with the standard 6-unit corpus."""
+    await store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
+    return store
+
+
+@pytest_asyncio.fixture()
+async def client(test_sm):
+    """AsyncClient against the FastAPI app with the test sessionmaker."""
+    app.state.store = MemoryStore(test_sm)
+    app.state.mgr = MemoryManager(
+        store=app.state.store,
+        retrieval_mode="keyword",
+        auto_consolidate=True,
+    )
+    await app.state.store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture()
+async def client_and_store(test_sm):
+    """AsyncClient + direct MemoryStore access for asserting DB state after writes."""
+    store = MemoryStore(test_sm)
+    app.state.store = store
+    app.state.mgr = MemoryManager(
+        store=store,
+        retrieval_mode="keyword",
+        auto_consolidate=True,
+    )
+    await store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac, store

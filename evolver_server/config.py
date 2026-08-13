@@ -8,7 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8100
-    db_path: str = "~/.simplemem/evolver_server.db"
+    database_url: str = "postgresql+asyncpg://postgres:password@localhost:5442/simplemem"
+    embedding_dim: int = 1024
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
     retrieval_mode: str = "hybrid"
     default_top_k: int = 10
     cors_allowed_origins: str = "*"

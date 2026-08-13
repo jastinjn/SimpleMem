@@ -1,0 +1,11 @@
+name: simplemem
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    ports:
+      - 5442:5432
+    environment:
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=simplemem

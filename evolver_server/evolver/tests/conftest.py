@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: F401 — used by callers
 
 from evolver_server.evolver.models import MemoryType, MemoryUnit
 from evolver_server.evolver.store import MemoryStore
@@ -40,7 +42,7 @@ from evolver_server.evolver.store import MemoryStore
 UID = "user-test"
 
 # ---------------------------------------------------------------------------
-# Corpus helper (analogous to create_test_entries in tests/test_vector_store.py)
+# Corpus helper
 # ---------------------------------------------------------------------------
 
 def create_test_units(user_id: str = UID, scope_id: str = "test") -> list[MemoryUnit]:
@@ -150,8 +152,8 @@ def create_test_units(user_id: str = UID, scope_id: str = "test") -> list[Memory
 # Store factory
 # ---------------------------------------------------------------------------
 
-def _make_store(tmp_path: Path, name: str = "mem.db") -> MemoryStore:
-    return MemoryStore(str(tmp_path / name))
+def _make_store(sm: async_sessionmaker) -> MemoryStore:
+    return MemoryStore(sm)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,12 @@ def frozen_consolidator_clock(monkeypatch):
     clock = FrozenClock(FROZEN_NOW)
     monkeypatch.setattr("evolver_server.evolver.consolidator.datetime", clock)
     return clock
+
+
+@pytest_asyncio.fixture()
+async def store(test_sm):
+    """A fresh MemoryStore backed by the test DB (tables truncated by root conftest)."""
+    return MemoryStore(test_sm)
 
 
 @pytest.fixture

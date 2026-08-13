@@ -29,8 +29,8 @@ class MemoryConsolidator:
         self.min_importance = max(0.0, min(1.0, min_importance))
         self.decay_mode = decay_mode if decay_mode in ("linear", "exponential") else "linear"
 
-    def consolidate(self, user_id: str, scope_id: str | None = None) -> dict:
-        units = self.store.list_active(user_id, scope_id, limit=2000)
+    async def consolidate(self, user_id: str, scope_id: str | None = None) -> dict:
+        units = await self.store.list_active(user_id, scope_id, limit=2000)
         now = utc_now_iso()
         superseded = 0
 
@@ -38,7 +38,7 @@ class MemoryConsolidator:
         working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]
         working.sort(key=lambda u: u.updated_at, reverse=True)
         for stale in working[1:]:
-            self.store.supersede(stale.memory_id, working[0].memory_id, updated_at=now)
+            await self.store.supersede(stale.memory_id, working[0].memory_id, updated_at=now)
             superseded += 1
 
         # Exact duplicate content deduplication.
@@ -52,17 +52,17 @@ class MemoryConsolidator:
                 seen[key] = unit.memory_id
                 remaining.append(unit)
                 continue
-            self.store.supersede(unit.memory_id, seen[key], updated_at=now)
+            await self.store.supersede(unit.memory_id, seen[key], updated_at=now)
             superseded += 1
 
         # Near-duplicate merging via token overlap similarity.
-        superseded += self._merge_near_duplicates(remaining, now)
+        superseded += await self._merge_near_duplicates(remaining, now)
 
         # Entity-based cross-type reinforcement.
-        reinforced = self._reinforce_shared_entities(remaining)
+        reinforced = await self._reinforce_shared_entities(remaining)
 
         # Importance decay for old, unused memories.
-        decayed = self._apply_importance_decay(units, now)
+        decayed = await self._apply_importance_decay(units, now)
 
         result = {"superseded": superseded, "decayed": decayed, "reinforced": reinforced}
         if superseded or decayed or reinforced:
@@ -72,12 +72,12 @@ class MemoryConsolidator:
             )
         return result
 
-    def dry_run(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def dry_run(self, user_id: str, scope_id: str | None = None) -> dict:
         """Preview what consolidation would do without applying changes.
 
         Returns counts and details of what would happen.
         """
-        units = self.store.list_active(user_id, scope_id, limit=2000)
+        units = await self.store.list_active(user_id, scope_id, limit=2000)
 
         # Stale working summaries.
         working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]
@@ -163,7 +163,7 @@ class MemoryConsolidator:
                 count += 1
         return count
 
-    def _merge_near_duplicates(self, units: list[MemoryUnit], now: str) -> int:
+    async def _merge_near_duplicates(self, units: list[MemoryUnit], now: str) -> int:
         if len(units) < 2 or self.similarity_threshold <= 0.0:
             return 0
 
@@ -197,13 +197,12 @@ class MemoryConsolidator:
                             and drop.updated_at > keep.updated_at
                         ):
                             keep, drop = drop, keep
-                        self.store.supersede(drop.memory_id, keep.memory_id, updated_at=now)
+                        await self.store.supersede(drop.memory_id, keep.memory_id, updated_at=now)
                         alive.discard(drop.memory_id)
                         superseded += 1
         return superseded
 
-
-    def _reinforce_shared_entities(self, units: list[MemoryUnit]) -> int:
+    async def _reinforce_shared_entities(self, units: list[MemoryUnit]) -> int:
         """Boost reinforcement score for memories that share entities with other memories.
 
         When multiple memories mention the same entity, it indicates that entity
@@ -238,13 +237,13 @@ class MemoryConsolidator:
                 boost = min(0.05, 0.3 - unit.reinforcement_score)
                 if boost > 0.001:
                     new_score = round(unit.reinforcement_score + boost, 4)
-                    self.store.update_reinforcement(mid, new_score, now)
+                    await self.store.update_reinforcement(mid, new_score, now)
                     seen.add(mid)
                     reinforced += 1
 
         return reinforced
 
-    def _apply_importance_decay(self, units: list[MemoryUnit], now_iso: str) -> int:
+    async def _apply_importance_decay(self, units: list[MemoryUnit], now_iso: str) -> int:
         """Reduce importance of old memories that haven't been accessed recently."""
         if self.decay_factor <= 0.0:
             return 0
@@ -285,7 +284,7 @@ class MemoryConsolidator:
                     unit.importance * (1.0 - self.decay_factor * min(periods, 5.0)),
                 )
             if round(new_importance, 4) < round(unit.importance, 4):
-                self.store.update_importance(unit.memory_id, round(new_importance, 4), now_iso)
+                await self.store.update_importance(unit.memory_id, round(new_importance, 4), now_iso)
                 decayed += 1
 
         return decayed

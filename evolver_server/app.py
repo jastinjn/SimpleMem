@@ -2,10 +2,8 @@
 
 One shared ``MemoryStore`` + one process-wide ``MemoryManager`` are created in the
 lifespan handler. Tenant isolation is via the ``user_id`` (required) and optional
-``scope_id`` passed on every call — a single shared SQLite DB with ``user_id`` and
-``scope_id`` columns (the evolver's native model). The store's internal lock
-serializes SQLite access, so endpoints are defined as sync ``def`` and run in
-Starlette's threadpool.
+``scope_id`` passed on every call — a single shared PostgreSQL DB with ``user_id`` and
+``scope_id`` columns (the evolver's native model).
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from evolver_server.evolver.db import build_engine, build_sessionmaker
 from evolver_server.evolver.manager import MemoryManager
 from evolver_server.evolver.models import MemoryQuery
 from evolver_server.evolver.store import MemoryStore
@@ -37,7 +36,13 @@ from .models import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    store = MemoryStore(settings.db_path)
+    engine = build_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    sm = build_sessionmaker(engine)
+    store = MemoryStore(sm)
     mgr = MemoryManager(
         store=store,
         retrieval_mode=settings.retrieval_mode,
@@ -46,11 +51,11 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.mgr = mgr
     print(
-        f"[EvolverAPI] ready — db={settings.db_path} "
+        f"[EvolverAPI] ready — db={settings.database_url!r} "
         f"retrieval_mode={settings.retrieval_mode} auto_consolidate=True"
     )
     yield
-    # SQLite connection closes on process exit; nothing to tear down.
+    await engine.dispose()
 
 
 settings = get_settings()
@@ -93,13 +98,13 @@ def health() -> dict:
 
 
 @app.post("/memory/add", response_model=AddResponse)
-def memory_add(req: AddRequest) -> AddResponse:
+async def memory_add(req: AddRequest) -> AddResponse:
     """Ingest a single dialogue turn into the caller's scope.
 
     Consolidation runs automatically afterwards (auto_consolidate=True).
     """
     try:
-        added = _mgr(app).ingest_session_turns(
+        added = await _mgr(app).ingest_session_turns(
             req.session_id,
             [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
             user_id=req.user_id,
@@ -116,10 +121,10 @@ def memory_add(req: AddRequest) -> AddResponse:
 
 
 @app.post("/memory/add_batch", response_model=AddResponse)
-def memory_add_batch(req: AddBatchRequest) -> AddResponse:
+async def memory_add_batch(req: AddBatchRequest) -> AddResponse:
     """Ingest multiple dialogue turns into the caller's scope (windowed extraction)."""
     try:
-        added = _mgr(app).ingest_session_turns(
+        added = await _mgr(app).ingest_session_turns(
             req.session_id,
             [t.model_dump() for t in req.turns],
             user_id=req.user_id,
@@ -136,7 +141,7 @@ def memory_add_batch(req: AddBatchRequest) -> AddResponse:
 
 
 @app.post("/memory/retrieve", response_model=RetrieveResponse)
-def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
+async def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
     """Hybrid (semantic + lexical) search within the caller's scope."""
     try:
         query = MemoryQuery(
@@ -145,7 +150,7 @@ def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
             query_text=req.query,
             top_k=req.top_k,
         )
-        hits = _mgr(app).retriever.retrieve(query)
+        hits = await _mgr(app).retriever.retrieve(query)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -174,10 +179,10 @@ def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
 
 
 @app.post("/memory/clear", response_model=ClearResponse)
-def memory_clear(req: ClearRequest) -> ClearResponse:
+async def memory_clear(req: ClearRequest) -> ClearResponse:
     """Soft-clear the caller's scope (archive all non-pinned active memories)."""
     try:
-        result = _mgr(app).archive_scope(req.user_id, req.scope_id)
+        result = await _mgr(app).archive_scope(req.user_id, req.scope_id)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
     return ClearResponse(
@@ -190,10 +195,10 @@ def memory_clear(req: ClearRequest) -> ClearResponse:
 
 
 @app.post("/memory/stats", response_model=StatsResponse)
-def memory_stats(req: StatsRequest) -> StatsResponse:
+async def memory_stats(req: StatsRequest) -> StatsResponse:
     """Return memory counts for the caller's scope."""
     try:
-        stats = _mgr(app).get_scope_stats(req.user_id, req.scope_id)
+        stats = await _mgr(app).get_scope_stats(req.user_id, req.scope_id)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
     return StatsResponse(

@@ -145,7 +145,7 @@ class MemoryManager:
             except Exception as exc:
                 logger.debug("Event callback error for %s: %s", event, exc)
 
-    def ingest_session_turns(
+    async def ingest_session_turns(
         self,
         session_id: str,
         turns: list[dict],
@@ -166,7 +166,7 @@ class MemoryManager:
             if not prompt_text and not response_text:
                 continue
 
-            extracted = _extract_memory_units_for_turn(
+            extracted = await _extract_memory_units_for_turn(
                 user_id=uid,
                 scope_id=scope,
                 session_id=session_id,
@@ -182,7 +182,7 @@ class MemoryManager:
                     ", ".join(u.memory_type.value for u in extracted),
                 )
             units.extend(extracted)
-            context.add_turn(prompt_text, response_text, idx)
+            await context.add_turn(prompt_text, response_text, idx)
 
         # Stamp user_id on all extracted units.
         for u in units:
@@ -211,7 +211,7 @@ class MemoryManager:
 
         # Pre-ingestion dedup: skip units whose content already exists in the store.
         pre_dedup_count = len(units)
-        units = _dedup_against_store(units, self.store, uid, scope)
+        units = await _dedup_against_store(units, self.store, uid, scope)
         dedup_skipped = pre_dedup_count - len(units)
         if dedup_skipped or (pre_validate_count - pre_dedup_count):
             logger.info(
@@ -220,7 +220,7 @@ class MemoryManager:
             )
 
         # Detect potential conflicts with existing memories.
-        conflicts = _detect_conflicts(units, self.store, uid, scope)
+        conflicts = await _detect_conflicts(units, self.store, uid, scope)
         if conflicts:
             logger.info("[Memory] detected %d conflicts with existing memories", len(conflicts))
             if self.telemetry_store is not None:
@@ -236,10 +236,10 @@ class MemoryManager:
                     " ".join([unit.summary, unit.content, " ".join(unit.topics), " ".join(unit.entities)])
                 )
 
-        added = self.store.add_memories(units)
-        self.clear_cache()
+        added = await self.store.add_memories(units)
+        await self.clear_cache()
         if self.auto_consolidate:
-            consolidation_result = self.consolidator.consolidate(uid, scope)
+            consolidation_result = await self.consolidator.consolidate(uid, scope)
             if self.telemetry_store is not None and consolidation_result:
                 self.telemetry_store.record(
                     "memory_consolidation",
@@ -251,7 +251,7 @@ class MemoryManager:
                         "reinforced": consolidation_result.get("reinforced", 0),
                     },
                 )
-        stats = summarize_memory_store(self.store, uid, scope)
+        stats = await summarize_memory_store(self.store, uid, scope)
         self._refresh_policy(scope)
         if self.telemetry_store is not None:
             self.telemetry_store.record(
@@ -275,13 +275,13 @@ class MemoryManager:
         )
         # Auto-save stats snapshot after ingestion for trend tracking.
         try:
-            self.store.save_stats_snapshot(uid, scope)
+            await self.store.save_stats_snapshot(uid, scope)
         except Exception:
             pass  # Best-effort stats tracking.
         self._notify("ingest", scope_id=scope, session_id=session_id, added=added)
         return added
 
-    def retrieve_for_prompt(
+    async def retrieve_for_prompt(
         self,
         task_description: str,
         scope_id: str | None = None,
@@ -305,14 +305,14 @@ class MemoryManager:
             top_k=self.policy.max_injected_units,
             max_tokens=self.policy.max_injected_tokens,
         )
-        hits = self.retriever.retrieve(query)
+        hits = await self.retriever.retrieve(query)
         hit_units = [h.unit for h in hits]
         # Optionally expand with linked memories from the graph.
         if expand_links and hit_units:
             seen_ids = {u.memory_id for u in hit_units}
             linked_extras: list[MemoryUnit] = []
             for u in hit_units[:5]:  # Limit expansion to top-5 to stay lightweight.
-                linked = self.store.get_linked_memories(u.memory_id)
+                linked = await self.store.get_linked_memories(u.memory_id)
                 for lu in linked:
                     if lu.memory_id not in seen_ids:
                         linked_extras.append(lu)
@@ -325,7 +325,7 @@ class MemoryManager:
             for u in units:
                 type_summary[u.memory_type.value] = type_summary.get(u.memory_type.value, 0) + 1
             score_strs = [f"{h.score:.3f}" for h in hits[:len(units)]]
-            rendered_for_log = self.render_for_prompt(units)
+            rendered_for_log = await self.render_for_prompt(units)
             logger.info(
                 "[Memory] retrieve scope=%s mode=%s → %d/%d units, tokens≈%d, types=%s, scores=[%s], query=%s",
                 effective_scope,
@@ -337,12 +337,12 @@ class MemoryManager:
                 ", ".join(score_strs),
                 task_description[:80],
             )
-            self.store.mark_accessed([u.memory_id for u in units], accessed_at=utc_now_iso())
+            await self.store.mark_accessed([u.memory_id for u in units], accessed_at=utc_now_iso())
             # Auto-boost importance for frequently accessed memories.
             for u in units:
                 if u.access_count >= 3 and u.importance < 0.9:
                     new_importance = min(0.9, u.importance + 0.02)
-                    self.store.update_importance(u.memory_id, round(new_importance, 4), utc_now_iso())
+                    await self.store.update_importance(u.memory_id, round(new_importance, 4), utc_now_iso())
         else:
             logger.info(
                 "[Memory] retrieve scope=%s mode=%s → 0 hits, query=%s",
@@ -383,16 +383,16 @@ class MemoryManager:
     _cache_hits: int = 0
     _cache_misses: int = 0
 
-    def clear_cache(self) -> None:
+    async def clear_cache(self) -> None:
         """Clear the retrieval cache (e.g., after ingestion)."""
         self._retrieval_cache.clear()
 
-    def render_for_prompt(self, units: list[MemoryUnit], include_pool_context: bool = False) -> str:
+    async def render_for_prompt(self, units: list[MemoryUnit], include_pool_context: bool = False) -> str:
         if not units:
             return ""
         lines = ["## Relevant Long-Term Memory"]
         if include_pool_context:
-            stats = self.get_scope_stats()
+            stats = await self.get_scope_stats()
             active = stats.get("active", 0)
             types = stats.get("type_count", 0)
             lines.append(f"_Pool: {active} memories across {types} types. Showing top {len(units)}._")
@@ -421,18 +421,18 @@ class MemoryManager:
                         lines.append(f"- {text}")
         return "\n".join(lines).strip()
 
-    def get_scope_stats(self, user_id: str | None = None, scope_id: str | None = None) -> dict:
-        return summarize_memory_store(self.store, user_id or self.user_id, scope_id)
+    async def get_scope_stats(self, user_id: str | None = None, scope_id: str | None = None) -> dict:
+        return await summarize_memory_store(self.store, user_id or self.user_id, scope_id)
 
-    def get_policy_state(self) -> dict:
+    async def get_policy_state(self) -> dict:
         if self.policy_store is None:
             return {}
         return self.policy_store.load().__dict__
 
-    def get_access_patterns(self, scope_id: str | None = None, limit: int = 5) -> dict:
+    async def get_access_patterns(self, scope_id: str | None = None, limit: int = 5) -> dict:
         """Return access pattern insights for the given scope."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         if not units:
             return {"total": 0, "most_accessed": [], "never_accessed": 0}
         sorted_by_access = sorted(units, key=lambda u: u.access_count, reverse=True)
@@ -449,19 +449,19 @@ class MemoryManager:
             "avg_access_count": round(avg_access, 2),
         }
 
-    def diagnose(self, scope_id: str | None = None) -> dict:
+    async def diagnose(self, scope_id: str | None = None) -> dict:
         """Return a diagnostic summary for operator debugging.
 
         Combines store stats, policy state, access patterns, and retrieval
         telemetry into a single view for quick health assessment.
         """
         scope = scope_id or self.scope_id
-        stats = self.get_scope_stats(scope)
-        access = self.get_access_patterns(scope)
-        policy = self.get_policy_state()
+        stats = await self.get_scope_stats(scope)
+        access = await self.get_access_patterns(scope)
+        policy = await self.get_policy_state()
 
         # Analyze retrieval telemetry for recent performance.
-        telemetry = self.get_recent_telemetry(limit=50)
+        telemetry = await self.get_recent_telemetry(limit=50)
         retrieval_events = [
             e for e in telemetry if e.get("event_type") == "memory_retrieval"
         ]
@@ -480,7 +480,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         age_buckets = {"<1h": 0, "<24h": 0, "<7d": 0, "older": 0}
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         now = datetime.now(timezone.utc)
         for u in units:
             try:
@@ -562,14 +562,14 @@ class MemoryManager:
             "issues": issues,
         }
 
-    def detect_conflicts(self, scope_id: str | None = None) -> list[dict]:
+    async def detect_conflicts(self, scope_id: str | None = None) -> list[dict]:
         """Detect potential contradictions within the active memory pool.
 
         Compares all active memories of the same type that share significant
         topic/entity overlap but have different content.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         if len(units) < 2:
             return []
 
@@ -604,7 +604,7 @@ class MemoryManager:
                 })
         return conflicts
 
-    def explain_retrieval(
+    async def explain_retrieval(
         self,
         task_description: str,
         scope_id: str | None = None,
@@ -622,7 +622,7 @@ class MemoryManager:
             top_k=self.policy.max_injected_units,
             max_tokens=self.policy.max_injected_tokens,
         )
-        hits = self.retriever.retrieve(query)
+        hits = await self.retriever.retrieve(query)
         return [
             {
                 "memory_id": h.unit.memory_id,
@@ -637,67 +637,67 @@ class MemoryManager:
             for h in hits
         ]
 
-    def list_scopes(self) -> list[dict]:
+    async def list_scopes(self) -> list[dict]:
         """List all scopes in the store with memory counts."""
-        return self.store.list_scopes()
+        return await self.store.list_scopes(self.user_id)
 
-    def update_memory(self, memory_id: str, content: str, summary: str = "") -> bool:
+    async def update_memory(self, memory_id: str, content: str, summary: str = "") -> bool:
         """Update the content of an existing memory."""
-        result = self.store.update_content(memory_id, content, summary)
+        result = await self.store.update_content(memory_id, content, summary)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def get_memory(self, memory_id: str) -> MemoryUnit | None:
+    async def get_memory(self, memory_id: str) -> MemoryUnit | None:
         """Get a specific memory by ID."""
-        return self.store._get_by_id(memory_id)
+        return await self.store.get_by_id(memory_id)
 
-    def set_ttl(self, memory_id: str, expires_at: str) -> bool:
+    async def set_ttl(self, memory_id: str, expires_at: str) -> bool:
         """Set or clear a TTL on a memory.
 
         Args:
             memory_id: Target memory.
             expires_at: ISO-8601 expiry timestamp, or empty string to clear.
         """
-        result = self.store.set_ttl(memory_id, expires_at)
+        result = await self.store.set_ttl(memory_id, expires_at)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def expire_stale(self, scope_id: str | None = None) -> int:
+    async def expire_stale(self, scope_id: str | None = None) -> int:
         """Archive all memories that have passed their TTL."""
         scope = scope_id or self.scope_id
-        count = self.store.expire_stale(scope)
+        count = await self.store.expire_stale(self.user_id, scope)
         if count:
-            self.clear_cache()
+            await self.clear_cache()
             self._notify("expire", scope_id=scope, expired_count=count)
         return count
 
-    def share_memory(self, memory_id: str, target_scope_id: str) -> str | None:
+    async def share_memory(self, memory_id: str, target_scope_id: str) -> str | None:
         """Copy a memory to another scope for cross-scope knowledge sharing.
 
         Returns the new memory ID in the target scope.
         """
-        new_id = self.store.share_to_scope(memory_id, target_scope_id)
+        new_id = await self.store.share_to_scope(memory_id, target_scope_id)
         if new_id:
-            self.clear_cache()
+            await self.clear_cache()
             self._notify("share", memory_id=memory_id, target_scope_id=target_scope_id, new_id=new_id)
         return new_id
 
-    def export_scope(self, scope_id: str | None = None) -> list[dict]:
+    async def export_scope(self, scope_id: str | None = None) -> list[dict]:
         """Export all active memories for a scope as JSON-serializable dicts."""
         scope = scope_id or self.scope_id
-        return self.store.export_scope_json(scope)
+        return await self.store.export_scope_json(self.user_id, scope)
 
-    def import_memories(self, data: list[dict], target_scope_id: str | None = None) -> int:
+    async def import_memories(self, data: list[dict], target_scope_id: str | None = None) -> int:
         """Import memories from JSON dicts into the store."""
         scope = target_scope_id or self.scope_id
-        count = self.store.import_memories_json(data, scope)
+        count = await self.store.import_memories_json(self.user_id, data, scope)
         if count:
-            self.clear_cache()
+            await self.clear_cache()
         return count
 
-    def set_type_ttl(
+    async def set_type_ttl(
         self,
         memory_type: MemoryType,
         expires_at: str,
@@ -705,74 +705,74 @@ class MemoryManager:
     ) -> int:
         """Set TTL on all active memories of a given type."""
         scope = scope_id or self.scope_id
-        count = self.store.set_type_ttl(scope, memory_type, expires_at)
+        count = await self.store.set_type_ttl(self.user_id, scope, memory_type, expires_at)
         if count:
-            self.clear_cache()
+            await self.clear_cache()
         return count
 
-    def merge_memories(self, id_a: str, id_b: str, merged_content: str, merged_summary: str = "") -> str | None:
+    async def merge_memories(self, id_a: str, id_b: str, merged_content: str, merged_summary: str = "") -> str | None:
         """Merge two memories into a new one, superseding both."""
-        new_id = self.store.merge_memories(id_a, id_b, merged_content, merged_summary)
+        new_id = await self.store.merge_memories(id_a, id_b, merged_content, merged_summary)
         if new_id:
-            self.clear_cache()
+            await self.clear_cache()
             self._notify("merge", id_a=id_a, id_b=id_b, new_id=new_id)
         return new_id
 
-    def get_memory_history(self, memory_id: str) -> list[dict]:
+    async def get_memory_history(self, memory_id: str) -> list[dict]:
         """Get version history for a memory through its supersedes chain."""
-        return self.store.get_memory_history(memory_id)
+        return await self.store.get_memory_history(memory_id)
 
-    def get_scope_analytics(self, scope_id: str | None = None) -> dict:
+    async def get_scope_analytics(self, scope_id: str | None = None) -> dict:
         """Get comprehensive analytics for a scope."""
         scope = scope_id or self.scope_id
-        return self.store.get_scope_analytics(scope)
+        return await self.store.get_scope_analytics(self.user_id, scope)
 
-    def add_tags(self, memory_id: str, tags: list[str]) -> bool:
+    async def add_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Add user-defined tags to a memory."""
-        result = self.store.add_tags(memory_id, tags)
+        result = await self.store.add_tags(memory_id, tags)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def remove_tags(self, memory_id: str, tags: list[str]) -> bool:
+    async def remove_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Remove tags from a memory."""
-        result = self.store.remove_tags(memory_id, tags)
+        result = await self.store.remove_tags(memory_id, tags)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def search_by_tag(self, tag: str, scope_id: str | None = None, limit: int = 50) -> list[MemoryUnit]:
+    async def search_by_tag(self, tag: str, scope_id: str | None = None, limit: int = 50) -> list[MemoryUnit]:
         """Find all active memories with a given tag."""
         scope = scope_id or self.scope_id
-        return self.store.search_by_tag(scope, tag, limit)
+        return await self.store.search_by_tag(self.user_id, scope, tag, limit)
 
-    def bulk_archive(self, memory_ids: list[str]) -> int:
+    async def bulk_archive(self, memory_ids: list[str]) -> int:
         """Archive multiple memories at once."""
-        count = self.store.bulk_archive(memory_ids)
+        count = await self.store.bulk_archive(memory_ids)
         if count:
-            self.clear_cache()
+            await self.clear_cache()
         return count
 
-    def snapshot_scope(self, scope_id: str | None = None) -> dict:
+    async def snapshot_scope(self, scope_id: str | None = None) -> dict:
         """Create a point-in-time snapshot for potential rollback."""
         scope = scope_id or self.scope_id
-        return self.store.snapshot_scope(scope)
+        return await self.store.snapshot_scope(self.user_id, scope)
 
-    def restore_snapshot(self, snapshot: dict) -> int:
+    async def restore_snapshot(self, snapshot: dict) -> int:
         """Restore a scope from a previous snapshot."""
-        count = self.store.restore_snapshot(snapshot)
+        count = await self.store.restore_snapshot(snapshot)
         if count:
-            self.clear_cache()
+            await self.clear_cache()
         return count
 
-    def get_event_log(self, scope_id: str | None = None, limit: int = 50) -> list[dict]:
+    async def get_event_log(self, scope_id: str | None = None, limit: int = 50) -> list[dict]:
         """Get recent memory mutation events."""
         scope = scope_id or ""
-        return self.store.get_event_log(scope_id=scope, limit=limit)
+        return await self.store.get_event_log(scope_id=scope, limit=limit)
 
-    def find_similar(self, memory_id: str, limit: int = 5) -> list[dict]:
+    async def find_similar(self, memory_id: str, limit: int = 5) -> list[dict]:
         """Find memories similar to a given memory by topic/entity overlap."""
-        results = self.store.find_similar(memory_id, limit)
+        results = await self.store.find_similar(memory_id, limit)
         return [
             {
                 "memory_id": u.memory_id,
@@ -783,32 +783,32 @@ class MemoryManager:
             for u, score in results
         ]
 
-    def get_health_score(self, scope_id: str | None = None) -> dict:
+    async def get_health_score(self, scope_id: str | None = None) -> dict:
         """Get a composite health score (0-100) for the memory pool."""
         scope = scope_id or self.scope_id
-        return self.store.compute_health_score(scope)
+        return await self.store.compute_health_score(self.user_id, scope)
 
-    def find_duplicates(self, scope_id: str | None = None, threshold: float = 0.80) -> list[dict]:
+    async def find_duplicates(self, scope_id: str | None = None, threshold: float = 0.80) -> list[dict]:
         """Find near-duplicate memory pairs by content similarity."""
         scope = scope_id or self.scope_id
-        return self.store.find_duplicates(scope, threshold)
+        return await self.store.find_duplicates(self.user_id, scope, threshold)
 
-    def consolidation_dry_run(self, scope_id: str | None = None) -> dict:
+    async def consolidation_dry_run(self, scope_id: str | None = None) -> dict:
         """Preview what consolidation would do without applying changes."""
         scope = scope_id or self.scope_id
-        return self.consolidator.dry_run(scope)
+        return await self.consolidator.dry_run(self.user_id, scope)
 
-    def save_stats_snapshot(self, scope_id: str | None = None) -> dict:
+    async def save_stats_snapshot(self, scope_id: str | None = None) -> dict:
         """Save a timestamped stats snapshot for trend tracking."""
         scope = scope_id or self.scope_id
-        return self.store.save_stats_snapshot(scope)
+        return await self.store.save_stats_snapshot(self.user_id, scope)
 
-    def get_stats_trend(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def get_stats_trend(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
         """Get stats trend over time."""
         scope = scope_id or self.scope_id
-        return self.store.get_stats_trend(scope, limit)
+        return await self.store.get_stats_trend(self.user_id, scope, limit)
 
-    def search_advanced(
+    async def search_advanced(
         self,
         keyword: str = "",
         memory_type: str = "",
@@ -819,28 +819,28 @@ class MemoryManager:
     ) -> list[MemoryUnit]:
         """Search memories with combined criteria."""
         scope = scope_id or self.scope_id
-        return self.store.search_advanced(scope, keyword, memory_type, tag, min_importance, limit)
+        return await self.store.search_advanced(self.user_id, scope, keyword, memory_type, tag, min_importance, limit)
 
-    def compare_scopes(self, scope_a: str, scope_b: str) -> dict:
+    async def compare_scopes(self, scope_a: str, scope_b: str) -> dict:
         """Compare two scopes to find shared and unique memories."""
-        return self.store.compare_scopes(scope_a, scope_b)
+        return await self.store.compare_scopes(self.user_id, scope_a, scope_b)
 
-    def auto_resolve_conflicts(self, scope_id: str | None = None) -> dict:
+    async def auto_resolve_conflicts(self, scope_id: str | None = None) -> dict:
         """Automatically resolve conflicts by superseding older memories.
 
         When two same-type memories overlap significantly but have different
         content, the older one is superseded by the newer one.
         """
         scope = scope_id or self.scope_id
-        conflicts = self.detect_conflicts(scope)
+        conflicts = await self.detect_conflicts(scope)
         if not conflicts:
             return {"resolved": 0}
 
         now = utc_now_iso()
         resolved = 0
         for c in conflicts:
-            a = self.store._get_by_id(c["id_a"])
-            b = self.store._get_by_id(c["id_b"])
+            a = await self.store.get_by_id(c["id_a"])
+            b = await self.store.get_by_id(c["id_b"])
             if a is None or b is None:
                 continue
             # Skip if either is already superseded or pinned.
@@ -850,25 +850,25 @@ class MemoryManager:
                 continue
             # Supersede the older one.
             if a.created_at <= b.created_at:
-                self.store.supersede(a.memory_id, b.memory_id, now)
+                await self.store.supersede(a.memory_id, b.memory_id, now)
             else:
-                self.store.supersede(b.memory_id, a.memory_id, now)
+                await self.store.supersede(b.memory_id, a.memory_id, now)
             resolved += 1
 
         if resolved:
-            self.clear_cache()
+            await self.clear_cache()
         result = {"resolved": resolved, "total_conflicts": len(conflicts)}
         self._notify("conflict_resolution", scope_id=scope, **result)
         return result
 
-    def rebalance_importance(self, scope_id: str | None = None) -> dict:
+    async def rebalance_importance(self, scope_id: str | None = None) -> dict:
         """Rebalance importance distribution to prevent clustering.
 
         If too many memories have the same importance value, spread them
         out to improve retrieval differentiation.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if len(units) < 5:
             return {"adjusted": 0}
 
@@ -892,28 +892,28 @@ class MemoryManager:
                     continue
                 new_imp = round(min(0.95, base + idx * 0.05 / max(len(group) - 1, 1) * spread), 4)
                 if abs(new_imp - u.importance) > 0.005:
-                    self.store.update_importance(u.memory_id, new_imp, now)
+                    await self.store.update_importance(u.memory_id, new_imp, now)
                     adjusted += 1
 
         if adjusted:
-            self.clear_cache()
+            await self.clear_cache()
         return {"adjusted": adjusted}
 
-    def pin_memory(self, memory_id: str) -> bool:
+    async def pin_memory(self, memory_id: str) -> bool:
         """Pin a memory so it always ranks highest in retrieval."""
-        result = self.store.pin_memory(memory_id)
+        result = await self.store.pin_memory(memory_id)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def unpin_memory(self, memory_id: str) -> bool:
+    async def unpin_memory(self, memory_id: str) -> bool:
         """Unpin a previously pinned memory."""
-        result = self.store.unpin_memory(memory_id)
+        result = await self.store.unpin_memory(memory_id)
         if result:
-            self.clear_cache()
+            await self.clear_cache()
         return result
 
-    def provide_feedback(self, memory_id: str, helpful) -> None:
+    async def provide_feedback(self, memory_id: str, helpful) -> None:
         """Record retrieval feedback for a specific memory.
 
         Args:
@@ -922,8 +922,8 @@ class MemoryManager:
         """
         if isinstance(helpful, str):
             helpful = helpful.lower() in ("positive", "true", "yes", "1", "helpful")
-        self.store.record_feedback(memory_id, helpful)
-        self.clear_cache()
+        await self.store.record_feedback(memory_id, helpful)
+        await self.clear_cache()
         self._notify("feedback", memory_id=memory_id, helpful=helpful)
         if self.telemetry_store is not None:
             self.telemetry_store.record(
@@ -931,14 +931,14 @@ class MemoryManager:
                 {"memory_id": memory_id, "helpful": helpful},
             )
 
-    def analyze_feedback_patterns(self, scope_id: str | None = None) -> dict:
+    async def analyze_feedback_patterns(self, scope_id: str | None = None) -> dict:
         """Analyze retrieval feedback patterns for a scope.
 
         Returns statistics about positive/negative feedback distribution,
         most-boosted and most-penalized memories, and feedback density.
         """
         scope = scope_id or self.scope_id
-        events = self.store.get_event_log(scope_id=scope, limit=10000)
+        events = await self.store.get_event_log(scope_id=scope, limit=10000)
         feedback_events = [e for e in events if e.get("event_type") == "feedback"]
 
         positive = 0
@@ -976,13 +976,13 @@ class MemoryManager:
             "most_penalized": most_penalized,
         }
 
-    def get_pool_summary(self, scope_id: str | None = None, max_per_type: int = 3) -> str:
+    async def get_pool_summary(self, scope_id: str | None = None, max_per_type: int = 3) -> str:
         """Generate a concise summary of the entire memory pool.
 
         Returns a human-readable overview useful for operator inspection.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         if not units:
             return "No active memories."
 
@@ -1001,7 +1001,7 @@ class MemoryManager:
             if len(group) > max_per_type:
                 lines.append(f"  ... and {len(group) - max_per_type} more")
 
-        conflicts = self.detect_conflicts(scope)
+        conflicts = await self.detect_conflicts(scope)
         if conflicts:
             lines.append(f"\nPotential conflicts: {len(conflicts)}")
             for c in conflicts[:3]:
@@ -1009,7 +1009,7 @@ class MemoryManager:
 
         return "\n".join(lines)
 
-    def search_memories(
+    async def search_memories(
         self,
         query_text: str,
         scope_id: str | None = None,
@@ -1021,7 +1021,7 @@ class MemoryManager:
         Useful for operator debugging and inspection.
         """
         scope = scope_id or self.scope_id
-        hits = self.store.search_keyword(self.user_id, scope,query_text, limit=limit)
+        hits = await self.store.search_keyword(self.user_id, scope,query_text, limit=limit)
         return [
             {
                 "memory_id": h.unit.memory_id,
@@ -1036,7 +1036,7 @@ class MemoryManager:
             for h in hits
         ]
 
-    def bulk_update_importance(
+    async def bulk_update_importance(
         self,
         updates: list[tuple[str, float]],
     ) -> int:
@@ -1052,18 +1052,18 @@ class MemoryManager:
         now = utc_now_iso()
         for memory_id, importance in updates:
             clamped = max(0.1, min(0.99, importance))
-            self.store.update_importance(memory_id, round(clamped, 4), now)
+            await self.store.update_importance(memory_id, round(clamped, 4), now)
             count += 1
         if count:
-            self.clear_cache()
+            await self.clear_cache()
         return count
 
-    def get_recent_telemetry(self, limit: int = 20) -> list[dict]:
+    async def get_recent_telemetry(self, limit: int = 20) -> list[dict]:
         if self.telemetry_store is None:
             return []
         return self.telemetry_store.read_recent(limit=limit)
 
-    def apply_retention_policy(
+    async def apply_retention_policy(
         self,
         scope_id: str | None = None,
         max_age_days: int = 90,
@@ -1079,9 +1079,10 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
+        to_archive_ids: list[str] = []
 
         for u in units:
             # Never archive working summaries.
@@ -1103,21 +1104,16 @@ class MemoryManager:
                 continue
             if u.access_count > min_access_count:
                 continue
-            # Archive it.
-            self.store.conn.execute(
-                "UPDATE memories SET status = ?, updated_at = ? WHERE memory_id = ?",
-                ("archived", utc_now_iso(), u.memory_id),
-            )
-            self.store._remove_fts(u.memory_id)
+            to_archive_ids.append(u.memory_id)
             archived += 1
 
-        if archived:
-            self.store.conn.commit()
-            self.clear_cache()
+        if to_archive_ids:
+            await self.store.bulk_archive(to_archive_ids)
+            await self.clear_cache()
 
         return {"archived": archived, "scope_id": scope}
 
-    def apply_typed_retention(
+    async def apply_typed_retention(
         self,
         scope_id: str | None = None,
         type_policies: dict[str, dict] | None = None,
@@ -1141,9 +1137,10 @@ class MemoryManager:
             for k, v in type_policies.items():
                 defaults[k] = {**defaults.get(k, {}), **v}
 
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
+        to_archive_ids: list[str] = []
 
         for u in units:
             if u.memory_type == MemoryType.WORKING_SUMMARY:
@@ -1164,19 +1161,15 @@ class MemoryManager:
                 continue
             if u.access_count > policy.get("min_access_count", 0):
                 continue
-            self.store.conn.execute(
-                "UPDATE memories SET status = ?, updated_at = ? WHERE memory_id = ?",
-                ("archived", utc_now_iso(), u.memory_id),
-            )
-            self.store._remove_fts(u.memory_id)
+            to_archive_ids.append(u.memory_id)
             archived += 1
 
-        if archived:
-            self.store.conn.commit()
-            self.clear_cache()
+        if to_archive_ids:
+            await self.store.bulk_archive(to_archive_ids)
+            await self.clear_cache()
         return {"archived": archived, "scope_id": scope}
 
-    def apply_adaptive_ttl(
+    async def apply_adaptive_ttl(
         self,
         scope_id: str | None = None,
         base_days: dict[str, int] | None = None,
@@ -1202,7 +1195,7 @@ class MemoryManager:
         if base_days:
             defaults.update(base_days)
 
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
         for u in units:
@@ -1218,12 +1211,12 @@ class MemoryManager:
             if u.importance >= 0.7:
                 base = int(base * 1.5)
             expires = now + timedelta(days=base)
-            self.store.set_ttl(u.memory_id, expires.isoformat(timespec="seconds"))
+            await self.store.set_ttl(u.memory_id, expires.isoformat(timespec="seconds"))
             updated += 1
 
         return {"updated": updated, "scope_id": scope}
 
-    def batch_archive_by_criteria(
+    async def batch_archive_by_criteria(
         self,
         scope_id: str | None = None,
         max_quality_score: float | None = None,
@@ -1239,7 +1232,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         to_archive: list[str] = []
 
@@ -1263,31 +1256,24 @@ class MemoryManager:
                 except (ValueError, TypeError):
                     continue
             if max_quality_score is not None:
-                quality = self.score_memory_quality(u.memory_id)
+                quality = await self.score_memory_quality(u.memory_id)
                 if quality["score"] > max_quality_score:
                     continue
             to_archive.append(u.memory_id)
 
-        for mid in to_archive:
-            self.store.conn.execute(
-                "UPDATE memories SET status = ?, updated_at = ? WHERE memory_id = ?",
-                ("archived", utc_now_iso(), mid),
-            )
-            self.store._remove_fts(mid)
-
         if to_archive:
-            self.store.conn.commit()
-            self.clear_cache()
+            await self.store.bulk_archive(to_archive)
+            await self.clear_cache()
 
         return {"archived": len(to_archive), "scope_id": scope}
 
-    def score_memory_quality(self, memory_id: str) -> dict:
+    async def score_memory_quality(self, memory_id: str) -> dict:
         """Compute a quality score (0-100) for a single memory unit.
 
         Factors: content richness, metadata completeness, access activity,
         importance calibration, and link connectivity.
         """
-        unit = self.store._get_by_id(memory_id)
+        unit = await self.store.get_by_id(memory_id)
         if unit is None:
             return {"score": 0, "reason": "not found"}
 
@@ -1314,7 +1300,7 @@ class MemoryManager:
         importance_score = 15 * unit.importance
 
         # 5. Link connectivity (0-10).
-        links = self.store.get_links(memory_id)
+        links = await self.store.get_links(memory_id)
         link_score = min(10, 10 * min(len(links), 3) / 3.0)
 
         total = round(content_score + metadata_score + access_score + importance_score + link_score, 1)
@@ -1330,13 +1316,13 @@ class MemoryManager:
             },
         }
 
-    def get_lowest_quality_memories(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    async def get_lowest_quality_memories(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
         """Get the lowest-quality active memories in a scope for review/cleanup."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         scored = []
         for u in units:
-            result = self.score_memory_quality(u.memory_id)
+            result = await self.score_memory_quality(u.memory_id)
             result["content_preview"] = u.content[:80]
             result["memory_type"] = u.memory_type.value
             scored.append(result)
@@ -1345,101 +1331,96 @@ class MemoryManager:
 
     # --- Scope access control ---
 
-    def grant_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
+    async def grant_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
         """Grant a principal access to a scope."""
-        return self.store.grant_access(scope_id, principal, permission)
+        return await self.store.grant_access(scope_id, principal, permission)
 
-    def revoke_scope_access(self, scope_id: str, principal: str, permission: str | None = None) -> int:
+    async def revoke_scope_access(self, scope_id: str, principal: str, permission: str | None = None) -> int:
         """Revoke a principal's access to a scope."""
-        return self.store.revoke_access(scope_id, principal, permission)
+        return await self.store.revoke_access(scope_id, principal, permission)
 
-    def check_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
+    async def check_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
         """Check if a principal can access a scope."""
-        return self.store.check_access(scope_id, principal, permission)
+        return await self.store.check_access(scope_id, principal, permission)
 
-    def list_scope_grants(self, scope_id: str) -> list[dict]:
+    async def list_scope_grants(self, scope_id: str) -> list[dict]:
         """List all access grants for a scope."""
-        return self.store.list_scope_grants(scope_id)
+        return await self.store.list_scope_grants(scope_id)
 
     # --- Memory watches ---
 
-    def watch_memory(self, memory_id: str, watcher: str) -> bool:
+    async def watch_memory(self, memory_id: str, watcher: str) -> bool:
         """Watch a memory for changes."""
-        return self.store.add_watch(memory_id, watcher)
+        return await self.store.add_watch(memory_id, watcher)
 
-    def unwatch_memory(self, memory_id: str, watcher: str) -> bool:
+    async def unwatch_memory(self, memory_id: str, watcher: str) -> bool:
         """Stop watching a memory."""
-        return self.store.remove_watch(memory_id, watcher)
+        return await self.store.remove_watch(memory_id, watcher)
 
-    def get_watchers(self, memory_id: str) -> list[str]:
+    async def get_watchers(self, memory_id: str) -> list[str]:
         """Get all watchers for a memory."""
-        return self.store.get_watchers(memory_id)
+        return await self.store.get_watchers(memory_id)
 
-    def get_watched_memories(self, watcher: str) -> list[str]:
+    async def get_watched_memories(self, watcher: str) -> list[str]:
         """Get all memory IDs watched by a watcher."""
-        return self.store.get_watched_memories(watcher)
+        return await self.store.get_watched_memories(watcher)
 
     # --- Memory annotations ---
 
-    def add_annotation(self, memory_id: str, content: str, author: str = "") -> int:
+    async def add_annotation(self, memory_id: str, content: str, author: str = "") -> int:
         """Add an annotation to a memory."""
-        return self.store.add_annotation(memory_id, content, author)
+        return await self.store.add_annotation(memory_id, content, author)
 
-    def get_annotations(self, memory_id: str) -> list[dict]:
+    async def get_annotations(self, memory_id: str) -> list[dict]:
         """Get all annotations for a memory."""
-        return self.store.get_annotations(memory_id)
+        return await self.store.get_annotations(memory_id)
 
-    def delete_annotation(self, annotation_id: int) -> bool:
+    async def delete_annotation(self, annotation_id: int) -> bool:
         """Delete an annotation by ID."""
-        return self.store.delete_annotation(annotation_id)
+        return await self.store.delete_annotation(annotation_id)
 
     # --- Memory links ---
 
-    def add_link(self, source_id: str, target_id: str, link_type: str = "related") -> bool:
+    async def add_link(self, source_id: str, target_id: str, link_type: str = "related") -> bool:
         """Create a directed link between two memories."""
-        return self.store.add_link(source_id, target_id, link_type)
+        return await self.store.add_link(source_id, target_id, link_type)
 
-    def remove_link(self, source_id: str, target_id: str, link_type: str | None = None) -> int:
+    async def remove_link(self, source_id: str, target_id: str, link_type: str | None = None) -> int:
         """Remove a link between two memories."""
-        return self.store.remove_link(source_id, target_id, link_type)
+        return await self.store.remove_link(source_id, target_id, link_type)
 
-    def get_links(self, memory_id: str, direction: str = "both") -> list[dict]:
+    async def get_links(self, memory_id: str, direction: str = "both") -> list[dict]:
         """Get all links for a memory."""
-        return self.store.get_links(memory_id, direction)
+        return await self.store.get_links(memory_id, direction)
 
-    def get_linked_memories(self, memory_id: str, link_type: str | None = None) -> list[MemoryUnit]:
+    async def get_linked_memories(self, memory_id: str, link_type: str | None = None) -> list[MemoryUnit]:
         """Get all memory units linked to a given memory."""
-        return self.store.get_linked_memories(memory_id, link_type)
+        return await self.store.get_linked_memories(memory_id, link_type)
 
-    def migrate_scope(self, from_scope: str, to_scope: str) -> dict:
+    async def migrate_scope(self, from_scope: str, to_scope: str) -> dict:
         """Move all active memories from one scope to another.
 
         Memories are copied to the new scope and archived in the old scope.
         """
-        units = self.store.list_active(self.user_id, from_scope, limit=10000)
+        units = await self.store.list_active(self.user_id, from_scope, limit=10000)
         migrated = 0
         for u in units:
-            new_id = self.store.share_to_scope(u.memory_id, to_scope)
+            new_id = await self.store.share_to_scope(u.memory_id, to_scope)
             if new_id:
-                # Archive original.
-                self.store.conn.execute(
-                    "UPDATE memories SET status = ?, updated_at = ? WHERE memory_id = ?",
-                    ("archived", utc_now_iso(), u.memory_id),
-                )
-                self.store._remove_fts(u.memory_id)
                 migrated += 1
         if migrated:
-            self.store.conn.commit()
-            self.clear_cache()
+            to_archive = [u.memory_id for u in units]
+            await self.store.bulk_archive(to_archive)
+            await self.clear_cache()
         self._notify("scope_migration", from_scope=from_scope, to_scope=to_scope, migrated=migrated)
         return {"migrated": migrated, "from_scope": from_scope, "to_scope": to_scope}
 
-    def get_age_distribution(self, scope_id: str | None = None) -> dict:
+    async def get_age_distribution(self, scope_id: str | None = None) -> dict:
         """Get age distribution of active memories in named buckets."""
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         buckets = {"< 1 day": 0, "1-7 days": 0, "1-4 weeks": 0, "1-3 months": 0, "3+ months": 0}
 
@@ -1464,15 +1445,15 @@ class MemoryManager:
 
         return {"distribution": buckets, "total": len(units)}
 
-    def find_cross_scope_duplicates(
+    async def find_cross_scope_duplicates(
         self,
         scope_a: str,
         scope_b: str,
         threshold: float = 0.80,
     ) -> list[dict]:
         """Find near-duplicate memories across two scopes."""
-        units_a = self.store.list_active(self.user_id, scope_a, limit=500)
-        units_b = self.store.list_active(self.user_id, scope_b, limit=500)
+        units_a = await self.store.list_active(self.user_id, scope_a, limit=500)
+        units_b = await self.store.list_active(self.user_id, scope_b, limit=500)
         if not units_a or not units_b:
             return []
 
@@ -1504,13 +1485,13 @@ class MemoryManager:
         duplicates.sort(key=lambda x: x["similarity"], reverse=True)
         return duplicates[:20]
 
-    def suggest_type_corrections(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    async def suggest_type_corrections(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
         """Suggest memories that might be mistyped based on content analysis.
 
         Checks for content patterns that suggest a different type than assigned.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1546,7 +1527,7 @@ class MemoryManager:
 
         return suggestions[:limit]
 
-    def compute_urgency_scores(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    async def compute_urgency_scores(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
         """Compute urgency scores for memories that need attention.
 
         Urgency considers TTL proximity, low access count, and importance.
@@ -1555,7 +1536,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -1598,21 +1579,21 @@ class MemoryManager:
         scored.sort(key=lambda x: x["urgency"], reverse=True)
         return scored[:limit]
 
-    def get_memories_by_ids(self, memory_ids: list[str]) -> list:
+    async def get_memories_by_ids(self, memory_ids: list[str]) -> list:
         """Retrieve multiple memories by their IDs in a single operation."""
-        return self.store.get_by_ids(memory_ids)
+        return await self.store.get_by_ids(memory_ids)
 
-    def analyze_memory_impact(self, memory_id: str) -> dict:
+    async def analyze_memory_impact(self, memory_id: str) -> dict:
         """Analyze what depends on a memory and what would be affected by archiving it.
 
         Performs a transitive traversal of incoming depends_on links.
         """
-        unit = self.store._get_by_id(memory_id)
+        unit = await self.store.get_by_id(memory_id)
         if not unit:
             return {"error": "Memory not found", "memory_id": memory_id}
 
         # Find direct dependents (memories that depend_on this one).
-        incoming = self.store.get_links(memory_id, direction="incoming")
+        incoming = await self.store.get_links(memory_id, direction="incoming")
         direct_dependents = [
             lnk["source_id"] for lnk in incoming if lnk["link_type"] == "depends_on"
         ]
@@ -1627,13 +1608,13 @@ class MemoryManager:
                 continue
             visited.add(dep_id)
             all_dependents.append(dep_id)
-            further = self.store.get_links(dep_id, direction="incoming")
+            further = await self.store.get_links(dep_id, direction="incoming")
             for lnk in further:
                 if lnk["link_type"] == "depends_on" and lnk["source_id"] not in visited:
                     queue.append(lnk["source_id"])
 
         # Other relationships.
-        all_links = self.store.get_links(memory_id, direction="both")
+        all_links = await self.store.get_links(memory_id, direction="both")
         elaborations = [lnk["source_id"] for lnk in all_links if lnk["link_type"] == "elaborates" and lnk["direction"] == "incoming"]
         contradictions = [
             lnk["target_id"] if lnk["direction"] == "outgoing" else lnk["source_id"]
@@ -1641,7 +1622,7 @@ class MemoryManager:
         ]
 
         # Watchers.
-        watchers = self.store.get_watchers(memory_id)
+        watchers = await self.store.get_watchers(memory_id)
 
         return {
             "memory_id": memory_id,
@@ -1655,18 +1636,18 @@ class MemoryManager:
             "safe_to_archive": len(all_dependents) == 0,
         }
 
-    def detect_dependency_cycles(self, scope_id: str | None = None) -> list[list[str]]:
+    async def detect_dependency_cycles(self, scope_id: str | None = None) -> list[list[str]]:
         """Detect circular dependency chains in depends_on links.
 
         Returns a list of cycles, each cycle being a list of memory IDs.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
 
         # Build adjacency list for depends_on links.
         adj: dict[str, list[str]] = {}
         for u in units:
-            outgoing = self.store.get_links(u.memory_id, direction="outgoing")
+            outgoing = await self.store.get_links(u.memory_id, direction="outgoing")
             deps = [lnk["target_id"] for lnk in outgoing if lnk["link_type"] == "depends_on"]
             if deps:
                 adj[u.memory_id] = deps
@@ -1704,7 +1685,7 @@ class MemoryManager:
 
         return cycles
 
-    def build_version_tree(self, memory_id: str) -> dict:
+    async def build_version_tree(self, memory_id: str) -> dict:
         """Build a version tree rooted at a memory, following supersedes chains.
 
         Traverses both directions: finds the root (oldest ancestor) and all descendants.
@@ -1714,7 +1695,7 @@ class MemoryManager:
         root_id = memory_id
         visited_up = {memory_id}
         while True:
-            unit = self.store._get_by_id(root_id)
+            unit = await self.store.get_by_id(root_id)
             if not unit or not unit.superseded_by:
                 break
             if unit.superseded_by in visited_up:
@@ -1726,7 +1707,7 @@ class MemoryManager:
         # Let's find the oldest ancestor instead by looking for units that supersede this one.
         # Walk up: find all units whose superseded_by points to root candidates.
         # Simpler approach: get the full history chain using existing method.
-        history = self.get_memory_history(memory_id)
+        history = await self.get_memory_history(memory_id)
 
         def _build_node(entry: dict) -> dict:
             return {
@@ -1746,7 +1727,7 @@ class MemoryManager:
             "versions": nodes,
         }
 
-    def search_with_context(
+    async def search_with_context(
         self,
         query: str,
         scope_id: str | None = None,
@@ -1757,7 +1738,7 @@ class MemoryManager:
         Returns dicts with memory info and highlighted content snippets.
         """
         scope = scope_id or self.scope_id
-        hits = self.store.search_keyword(self.user_id, scope,query, limit=limit)
+        hits = await self.store.search_keyword(self.user_id, scope,query, limit=limit)
         results = []
         for hit in hits:
             # Build a snippet with matched terms marked.
@@ -1778,13 +1759,13 @@ class MemoryManager:
             })
         return results
 
-    def group_by_topic(self, scope_id: str | None = None, min_group_size: int = 2) -> dict:
+    async def group_by_topic(self, scope_id: str | None = None, min_group_size: int = 2) -> dict:
         """Group active memories by their dominant topic.
 
         Returns topic -> list of memory summaries, sorted by group size descending.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         topic_groups: dict[str, list[dict]] = {}
 
         for u in units:
@@ -1815,7 +1796,7 @@ class MemoryManager:
             "groups": sorted_groups,
         }
 
-    def find_stale_memories(
+    async def find_stale_memories(
         self,
         scope_id: str | None = None,
         stale_days: int = 30,
@@ -1828,7 +1809,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         stale: list[dict] = []
 
@@ -1860,7 +1841,7 @@ class MemoryManager:
         stale.sort(key=lambda x: x["staleness_factor"], reverse=True)
         return stale[:limit]
 
-    def bulk_add_links(
+    async def bulk_add_links(
         self,
         links: list[dict],
     ) -> dict:
@@ -1878,13 +1859,13 @@ class MemoryManager:
             if not source or not target:
                 skipped += 1
                 continue
-            if self.store.add_link(source, target, link_type):
+            if await self.store.add_link(source, target, link_type):
                 created += 1
             else:
                 skipped += 1
         return {"created": created, "skipped": skipped, "total": len(links)}
 
-    def get_memory_summary_report(self, scope_id: str | None = None) -> dict:
+    async def get_memory_summary_report(self, scope_id: str | None = None) -> dict:
         """Generate a comprehensive summary report of a scope's memory state.
 
         Combines stats, health, age distribution, importance histogram, and top topics
@@ -1893,11 +1874,11 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        stats = self.get_scope_stats(scope)
-        health = self.get_health_score(scope)
-        age_dist = self.get_age_distribution(scope)
-        importance_hist = self.get_importance_histogram(scope)
-        topics = self.group_by_topic(scope, min_group_size=1)
+        stats = await self.get_scope_stats(scope)
+        health = await self.get_health_score(scope)
+        age_dist = await self.get_age_distribution(scope)
+        importance_hist = await self.get_importance_histogram(scope)
+        topics = await self.group_by_topic(scope, min_group_size=1)
 
         # Top 5 topics by group size.
         top_topics = []
@@ -1916,14 +1897,14 @@ class MemoryManager:
             "topic_group_count": topics.get("total_groups", 0),
         }
 
-    def suggest_auto_tags(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def suggest_auto_tags(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
         """Suggest tags for memories based on content analysis.
 
         Analyzes content for topic keywords, entities, and patterns to suggest
         tags for memories that have no tags.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1962,14 +1943,14 @@ class MemoryManager:
 
         return suggestions[:limit]
 
-    def export_link_graph(self, scope_id: str | None = None) -> dict:
+    async def export_link_graph(self, scope_id: str | None = None) -> dict:
         """Export the memory link graph for visualization.
 
         Returns nodes (memories) and edges (links) in a format
         suitable for graph visualization tools.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
 
         nodes = []
         edges = []
@@ -1983,7 +1964,7 @@ class MemoryManager:
                 "importance": u.importance,
                 "topics": u.topics[:3],
             })
-            links = self.store.get_links(u.memory_id, direction="outgoing")
+            links = await self.store.get_links(u.memory_id, direction="outgoing")
             for lnk in links:
                 edge_key = (lnk["source_id"], lnk["target_id"], lnk["link_type"])
                 if edge_key not in seen_edges:
@@ -2001,13 +1982,13 @@ class MemoryManager:
             "edges": edges,
         }
 
-    def get_deduplication_report(self, scope_id: str | None = None, threshold: float = 0.75) -> dict:
+    async def get_deduplication_report(self, scope_id: str | None = None, threshold: float = 0.75) -> dict:
         """Generate a comprehensive deduplication report for a scope.
 
         Finds all near-duplicate pairs and groups them by cluster.
         """
         scope = scope_id or self.scope_id
-        dupes = self.find_duplicates(scope, threshold=threshold)
+        dupes = await self.find_duplicates(scope, threshold=threshold)
 
         # Group duplicates into clusters using union-find.
         parent: dict[str, str] = {}
@@ -2050,7 +2031,7 @@ class MemoryManager:
             ][:10],
         }
 
-    def search_regex(
+    async def search_regex(
         self,
         pattern: str,
         scope_id: str | None = None,
@@ -2061,7 +2042,7 @@ class MemoryManager:
         Returns matching memories with the matched portion highlighted.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         results = []
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
@@ -2084,18 +2065,18 @@ class MemoryManager:
 
         return results
 
-    def merge_scopes(self, source_scope: str, target_scope: str) -> dict:
+    async def merge_scopes(self, source_scope: str, target_scope: str) -> dict:
         """Merge all active memories from source scope into target scope.
 
         Unlike migrate_scope, this preserves the source scope intact.
         Memories are copied (shared) to the target scope.
         """
-        source_units = self.store.list_active(self.user_id, source_scope, limit=5000)
+        source_units = await self.store.list_active(self.user_id, source_scope, limit=5000)
         if not source_units:
             return {"copied": 0, "skipped": 0, "source_scope": source_scope, "target_scope": target_scope}
 
         # Check existing target content to avoid duplicates.
-        target_units = self.store.list_active(self.user_id, target_scope, limit=5000)
+        target_units = await self.store.list_active(self.user_id, target_scope, limit=5000)
         target_contents = {u.content.strip().lower() for u in target_units}
 
         copied = 0
@@ -2106,7 +2087,7 @@ class MemoryManager:
                 continue
             # Use share_to_scope to copy.
             try:
-                self.store.share_to_scope(u.memory_id, target_scope)
+                await self.store.share_to_scope(u.memory_id, target_scope)
                 copied += 1
             except Exception:
                 skipped += 1
@@ -2118,14 +2099,14 @@ class MemoryManager:
             "target_scope": target_scope,
         }
 
-    def compute_stats_delta(self, scope_id: str | None = None) -> dict:
+    async def compute_stats_delta(self, scope_id: str | None = None) -> dict:
         """Compare current stats with the most recent snapshot to show changes.
 
         Returns deltas for key metrics.
         """
         scope = scope_id or self.scope_id
-        current = self.get_scope_stats(scope)
-        trend = self.get_stats_trend(scope, limit=2)
+        current = await self.get_scope_stats(scope)
+        trend = await self.get_stats_trend(scope, limit=2)
 
         if not trend or len(trend) < 1:
             return {
@@ -2150,13 +2131,13 @@ class MemoryManager:
             "deltas": deltas,
         }
 
-    def diff_memories(self, memory_id_a: str, memory_id_b: str) -> dict:
+    async def diff_memories(self, memory_id_a: str, memory_id_b: str) -> dict:
         """Compare two memories side by side, showing differences.
 
         Returns a structured diff of content, metadata, and other fields.
         """
-        unit_a = self.store._get_by_id(memory_id_a)
-        unit_b = self.store._get_by_id(memory_id_b)
+        unit_a = await self.store.get_by_id(memory_id_a)
+        unit_b = await self.store.get_by_id(memory_id_b)
 
         if not unit_a or not unit_b:
             return {"error": "One or both memories not found"}
@@ -2197,14 +2178,14 @@ class MemoryManager:
             "importance_delta": round(unit_a.importance - unit_b.importance, 4),
         }
 
-    def clone_scope(self, source_scope: str, target_scope: str) -> dict:
+    async def clone_scope(self, source_scope: str, target_scope: str) -> dict:
         """Deep-clone a scope: copies all active memories with full metadata.
 
         Unlike merge_scopes, this creates fresh copies with new IDs.
         """
         import uuid
 
-        source_units = self.store.list_active(self.user_id, source_scope, limit=5000)
+        source_units = await self.store.list_active(self.user_id, source_scope, limit=5000)
         if not source_units:
             return {"cloned": 0, "source_scope": source_scope, "target_scope": target_scope}
 
@@ -2224,7 +2205,7 @@ class MemoryManager:
                 confidence=u.confidence,
                 tags=list(u.tags),
             )
-            self.store.add_memories([new_unit])
+            await self.store.add_memories([new_unit])
             cloned += 1
 
         return {
@@ -2233,13 +2214,13 @@ class MemoryManager:
             "target_scope": target_scope,
         }
 
-    def analyze_access_frequency(self, scope_id: str | None = None) -> dict:
+    async def analyze_access_frequency(self, scope_id: str | None = None) -> dict:
         """Categorize memories into hot (frequently accessed), warm, and cold buckets.
 
         Based on access_count relative to pool average.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"hot": [], "warm": [], "cold": [], "total": 0, "avg_access": 0}
 
@@ -2278,14 +2259,14 @@ class MemoryManager:
             "cold_count": len(cold),
         }
 
-    def suggest_enrichments(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def suggest_enrichments(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
         """Suggest enrichments for memories that lack metadata.
 
         Identifies memories missing summaries, tags, or topics that would benefit
         from enrichment.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -2313,10 +2294,10 @@ class MemoryManager:
         suggestions.sort(key=lambda x: (-x["importance"], x["completeness"]))
         return suggestions[:limit]
 
-    def get_content_density_stats(self, scope_id: str | None = None) -> dict:
+    async def get_content_density_stats(self, scope_id: str | None = None) -> dict:
         """Analyze content density: token counts, value per token, and size distribution."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"total": 0, "avg_tokens": 0, "avg_value_per_token": 0, "size_buckets": {}}
 
@@ -2350,7 +2331,7 @@ class MemoryManager:
             "size_buckets": buckets,
         }
 
-    def check_scope_quota(
+    async def check_scope_quota(
         self,
         scope_id: str | None = None,
         max_memories: int = 1000,
@@ -2360,7 +2341,7 @@ class MemoryManager:
         Returns quota status including current count, limit, and utilization.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=max_memories + 1)
+        units = await self.store.list_active(self.user_id, scope, limit=max_memories + 1)
         count = len(units)
         utilization = count / max(max_memories, 1)
 
@@ -2374,29 +2355,22 @@ class MemoryManager:
             "warning": utilization >= 0.9,
         }
 
-    def cascade_archive(self, memory_id: str) -> dict:
+    async def cascade_archive(self, memory_id: str) -> dict:
         """Archive a memory and all memories that depend on it (transitively)."""
         from datetime import datetime, timezone
 
-        impact = self.analyze_memory_impact(memory_id)
+        impact = await self.analyze_memory_impact(memory_id)
         if "error" in impact:
             return impact
 
-        to_archive = [memory_id] + impact["transitive_dependents"]
-        archived = 0
-        now = datetime.now(timezone.utc).isoformat()
-
-        for mid in to_archive:
-            unit = self.store._get_by_id(mid)
+        to_archive_all = [memory_id] + impact["transitive_dependents"]
+        active_ids = []
+        for mid in to_archive_all:
+            unit = await self.store.get_by_id(mid)
             if unit and unit.status.value == "active":
-                self.store.conn.execute(
-                    "UPDATE memories SET status = 'archived', updated_at = ? WHERE memory_id = ?",
-                    (now, mid),
-                )
-                archived += 1
-
-        self.store.conn.commit()
-        self.clear_cache()
+                active_ids.append(mid)
+        archived = await self.store.bulk_archive(active_ids)
+        await self.clear_cache()
 
         return {
             "archived": archived,
@@ -2404,10 +2378,10 @@ class MemoryManager:
             "dependents_archived": archived - 1 if archived > 0 else 0,
         }
 
-    def get_link_graph_stats(self, scope_id: str | None = None) -> dict:
+    async def get_link_graph_stats(self, scope_id: str | None = None) -> dict:
         """Compute statistics about the memory link graph."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
 
         total_links = 0
         link_type_counts: dict[str, int] = {}
@@ -2416,7 +2390,7 @@ class MemoryManager:
         most_connected = None
 
         for u in units:
-            links = self.store.get_links(u.memory_id, direction="both")
+            links = await self.store.get_links(u.memory_id, direction="both")
             conn_count = len(links)
             total_links += len([lnk for lnk in links if lnk["direction"] == "outgoing"])
 
@@ -2446,12 +2420,12 @@ class MemoryManager:
             "connectivity_ratio": round(len(linked_memories) / max(len(units), 1), 4),
         }
 
-    def forecast_expiry(self, scope_id: str | None = None) -> dict:
+    async def forecast_expiry(self, scope_id: str | None = None) -> dict:
         """Forecast memory expirations over upcoming time windows."""
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
 
         windows = {
@@ -2487,13 +2461,13 @@ class MemoryManager:
             "forecast": windows,
         }
 
-    def get_type_overlap_matrix(self, scope_id: str | None = None) -> dict:
+    async def get_type_overlap_matrix(self, scope_id: str | None = None) -> dict:
         """Compute topic overlap between memory types.
 
         Returns a matrix showing how much each pair of types shares topics.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
 
         type_topics: dict[str, set[str]] = {}
         for u in units:
@@ -2519,7 +2493,7 @@ class MemoryManager:
             "matrix": matrix,
         }
 
-    def recommend_archival(
+    async def recommend_archival(
         self,
         scope_id: str | None = None,
         limit: int = 20,
@@ -2530,7 +2504,7 @@ class MemoryManager:
         into a single archival recommendation score.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         recommendations: list[dict] = []
 
         from datetime import datetime, timezone
@@ -2571,7 +2545,7 @@ class MemoryManager:
                 reasons.append("no_metadata")
 
             # No links.
-            links = self.store.get_links(u.memory_id, direction="both")
+            links = await self.store.get_links(u.memory_id, direction="both")
             if not links:
                 score += 3
                 reasons.append("isolated")
@@ -2590,7 +2564,7 @@ class MemoryManager:
         recommendations.sort(key=lambda x: x["archival_score"], reverse=True)
         return recommendations[:limit]
 
-    def get_scope_dashboard(self, scope_id: str | None = None) -> dict:
+    async def get_scope_dashboard(self, scope_id: str | None = None) -> dict:
         """Generate a comprehensive operational dashboard for a scope.
 
         Combines: summary report, access frequency, content density, link stats,
@@ -2599,13 +2573,13 @@ class MemoryManager:
         scope = scope_id or self.scope_id
 
         report = self.get_memory_summary_report(scope)
-        access = self.analyze_access_frequency(scope)
-        density = self.get_content_density_stats(scope)
-        link_stats = self.get_link_graph_stats(scope)
-        forecast = self.forecast_expiry(scope)
+        access = await self.analyze_access_frequency(scope)
+        density = await self.get_content_density_stats(scope)
+        link_stats = await self.get_link_graph_stats(scope)
+        forecast = await self.forecast_expiry(scope)
         quota = self.check_scope_quota(scope)
-        archive_recs = self.recommend_archival(scope, limit=5)
-        urgency = self.compute_urgency_scores(scope, limit=5)
+        archive_recs = await self.recommend_archival(scope, limit=5)
+        urgency = await self.compute_urgency_scores(scope, limit=5)
 
         return {
             "scope_id": scope,
@@ -2640,19 +2614,19 @@ class MemoryManager:
             "urgent_items": len(urgency),
         }
 
-    def suggest_links(self, scope_id: str | None = None, threshold: float = 0.5, limit: int = 20) -> list[dict]:
+    async def suggest_links(self, scope_id: str | None = None, threshold: float = 0.5, limit: int = 20) -> list[dict]:
         """Suggest links between memories that share topics/entities but aren't linked.
 
         Uses topic and entity overlap to identify potential relationships.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, scope, limit=500)
         suggestions: list[dict] = []
 
         # Build existing link set.
         linked_pairs: set[tuple[str, str]] = set()
         for u in units:
-            links = self.store.get_links(u.memory_id, direction="both")
+            links = await self.store.get_links(u.memory_id, direction="both")
             for lnk in links:
                 pair = tuple(sorted([lnk["source_id"], lnk["target_id"]]))
                 linked_pairs.add(pair)
@@ -2686,14 +2660,14 @@ class MemoryManager:
         suggestions.sort(key=lambda x: x["similarity"], reverse=True)
         return suggestions[:limit]
 
-    def generate_detailed_scope_comparison(self, scope_a: str, scope_b: str) -> dict:
+    async def generate_detailed_scope_comparison(self, scope_a: str, scope_b: str) -> dict:
         """Generate a detailed comparison report between two scopes.
 
         Goes beyond compare_scopes to include type distributions, topic overlap,
         and health differences.
         """
-        units_a = self.store.list_active(self.user_id, scope_a, limit=5000)
-        units_b = self.store.list_active(self.user_id, scope_b, limit=5000)
+        units_a = await self.store.list_active(self.user_id, scope_a, limit=5000)
+        units_b = await self.store.list_active(self.user_id, scope_b, limit=5000)
 
         # Type distributions.
         types_a: dict[str, int] = {}
@@ -2744,7 +2718,7 @@ class MemoryManager:
             ),
         }
 
-    def validate_content(self, content: str, rules: dict | None = None) -> dict:
+    async def validate_content(self, content: str, rules: dict | None = None) -> dict:
         """Validate memory content against configurable rules.
 
         Default rules:
@@ -2792,13 +2766,13 @@ class MemoryManager:
             },
         }
 
-    def generate_auto_summaries(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def generate_auto_summaries(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
         """Generate summaries for memories that don't have them.
 
         Creates keyword-based summaries from content (first sentence + topics).
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         generated: list[dict] = []
 
         for u in units:
@@ -2819,11 +2793,7 @@ class MemoryManager:
             summary = f"{first_sentence}{topic_str}"
 
             # Apply the summary.
-            self.store.update_content(u.memory_id, u.content)  # triggers FTS re-index
-            self.store.conn.execute(
-                "UPDATE memories SET summary = ? WHERE memory_id = ?",
-                (summary, u.memory_id),
-            )
+            await self.store.update_content(u.memory_id, u.content, summary)
             generated.append({
                 "memory_id": u.memory_id,
                 "type": u.memory_type.value,
@@ -2833,11 +2803,10 @@ class MemoryManager:
             if len(generated) >= limit:
                 break
 
-        self.store.conn.commit()
-        self.clear_cache()
+        await self.clear_cache()
         return generated
 
-    def recalculate_importance(self, scope_id: str | None = None) -> dict:
+    async def recalculate_importance(self, scope_id: str | None = None) -> dict:
         """Recalculate importance for all memories based on current signals.
 
         Factors: access frequency, link count, metadata completeness, recency.
@@ -2845,7 +2814,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
 
@@ -2860,7 +2829,7 @@ class MemoryManager:
                 new_importance += min(u.access_count * 0.02, 0.2)
 
             # Link bonus.
-            links = self.store.get_links(u.memory_id, direction="both")
+            links = await self.store.get_links(u.memory_id, direction="both")
             if links:
                 new_importance += min(len(links) * 0.03, 0.15)
 
@@ -2890,7 +2859,7 @@ class MemoryManager:
             new_importance = min(round(new_importance, 4), 0.98)
 
             if abs(new_importance - u.importance) > 0.01:
-                self.store.update_importance(u.memory_id, new_importance, now.isoformat())
+                await self.store.update_importance(u.memory_id, new_importance, now.isoformat())
                 updated += 1
 
         return {
@@ -2899,10 +2868,10 @@ class MemoryManager:
             "scope_id": scope,
         }
 
-    def analyze_type_balance(self, scope_id: str | None = None) -> dict:
+    async def analyze_type_balance(self, scope_id: str | None = None) -> dict:
         """Analyze memory type distribution and suggest rebalancing actions."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"total": 0, "distribution": {}, "suggestions": []}
 
@@ -2941,12 +2910,12 @@ class MemoryManager:
             "suggestions": suggestions,
         }
 
-    def compare_scope_health(self, scope_a: str, scope_b: str) -> dict:
+    async def compare_scope_health(self, scope_a: str, scope_b: str) -> dict:
         """Compare health scores and key metrics between two scopes."""
-        health_a = self.get_health_score(scope_a)
-        health_b = self.get_health_score(scope_b)
-        stats_a = self.get_scope_stats(scope_a)
-        stats_b = self.get_scope_stats(scope_b)
+        health_a = await self.get_health_score(scope_a)
+        health_b = await self.get_health_score(scope_b)
+        stats_a = await self.get_scope_stats(scope_a)
+        stats_b = await self.get_scope_stats(scope_b)
 
         score_a = health_a.get("score", 0) if isinstance(health_a, dict) else 0
         score_b = health_b.get("score", 0) if isinstance(health_b, dict) else 0
@@ -2966,24 +2935,24 @@ class MemoryManager:
             "healthier_scope": scope_a if score_a >= score_b else scope_b,
         }
 
-    def get_memory_lifecycle(self, memory_id: str) -> dict:
+    async def get_memory_lifecycle(self, memory_id: str) -> dict:
         """Get the full lifecycle of a memory: creation, access, updates, and current state."""
-        unit = self.store._get_by_id(memory_id)
+        unit = await self.store.get_by_id(memory_id)
         if not unit:
             return {"error": "Memory not found", "memory_id": memory_id}
 
         # Get events.
-        events = self.store.get_event_log(limit=100)
+        events = await self.store.get_event_log(limit=100)
         memory_events = [e for e in events if e.get("memory_id") == memory_id]
 
         # Get links.
-        links = self.store.get_links(memory_id, direction="both")
+        links = await self.store.get_links(memory_id, direction="both")
 
         # Get annotations.
-        annotations = self.store.get_annotations(memory_id)
+        annotations = await self.store.get_annotations(memory_id)
 
         # Get watchers.
-        watchers = self.store.get_watchers(memory_id)
+        watchers = await self.store.get_watchers(memory_id)
 
         return {
             "memory_id": memory_id,
@@ -3008,7 +2977,7 @@ class MemoryManager:
             "events": memory_events[:10],
         }
 
-    def get_maintenance_recommendations(self, scope_id: str | None = None) -> dict:
+    async def get_maintenance_recommendations(self, scope_id: str | None = None) -> dict:
         """Generate maintenance recommendations based on scope state.
 
         Analyzes the scope and recommends specific maintenance actions.
@@ -3017,7 +2986,7 @@ class MemoryManager:
         actions = []
 
         # Check for expired memories.
-        forecast = self.forecast_expiry(scope)
+        forecast = await self.forecast_expiry(scope)
         if forecast["forecast"].get("next_24h", 0) > 0:
             actions.append({
                 "action": "expire_stale",
@@ -3035,7 +3004,7 @@ class MemoryManager:
             })
 
         # Check for stale memories.
-        stale = self.find_stale_memories(scope, stale_days=60, limit=1)
+        stale = await self.find_stale_memories(scope, stale_days=60, limit=1)
         if stale:
             actions.append({
                 "action": "review_stale",
@@ -3044,7 +3013,7 @@ class MemoryManager:
             })
 
         # Check type balance.
-        balance = self.analyze_type_balance(scope)
+        balance = await self.analyze_type_balance(scope)
         if balance.get("suggestions"):
             actions.append({
                 "action": "rebalance_types",
@@ -3062,7 +3031,7 @@ class MemoryManager:
             })
 
         # Check integrity.
-        integrity = self.store.validate_integrity()
+        integrity = await self.store.validate_integrity()
         if integrity.get("issues"):
             actions.append({
                 "action": "cleanup_orphans",
@@ -3071,7 +3040,7 @@ class MemoryManager:
             })
 
         # Check for memories without summaries.
-        units = self.store.list_active(self.user_id, scope, limit=100)
+        units = await self.store.list_active(self.user_id, scope, limit=100)
         unsummarized = sum(1 for u in units if not u.summary)
         if unsummarized > len(units) * 0.5 and len(units) > 5:
             actions.append({
@@ -3088,13 +3057,13 @@ class MemoryManager:
             "recommendations": actions,
         }
 
-    def export_for_training(self, scope_id: str | None = None) -> list[dict]:
+    async def export_for_training(self, scope_id: str | None = None) -> list[dict]:
         """Export memories in a format suitable for ML training/fine-tuning.
 
         Returns structured records with content, metadata, and quality signals.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         records = []
 
         for u in units:
@@ -3118,7 +3087,7 @@ class MemoryManager:
 
         return records
 
-    def batch_update_content(self, updates: list[dict]) -> dict:
+    async def batch_update_content(self, updates: list[dict]) -> dict:
         """Update content for multiple memories at once.
 
         Each update dict should have: memory_id, content.
@@ -3133,15 +3102,15 @@ class MemoryManager:
                 failed += 1
                 continue
             try:
-                self.store.update_content(memory_id, content)
+                await self.store.update_content(memory_id, content)
                 updated += 1
             except Exception:
                 failed += 1
 
-        self.clear_cache()
+        await self.clear_cache()
         return {"updated": updated, "failed": failed, "total": len(updates)}
 
-    def compute_freshness_scores(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def compute_freshness_scores(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
         """Compute combined freshness scores for memories.
 
         Considers: recency of creation, last access, update frequency, and TTL.
@@ -3150,7 +3119,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -3191,7 +3160,7 @@ class MemoryManager:
         scored.sort(key=lambda x: x["freshness"], reverse=True)
         return scored[:limit]
 
-    def get_scope_inventory(
+    async def get_scope_inventory(
         self,
         scope_id: str | None = None,
         type_filter: str | None = None,
@@ -3205,7 +3174,7 @@ class MemoryManager:
         Supports filtering by type, importance range, and sorting.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
 
         # Apply filters.
         filtered = units
@@ -3248,9 +3217,9 @@ class MemoryManager:
             "items": items,
         }
 
-    def normalize_content(self, memory_id: str) -> dict:
+    async def normalize_content(self, memory_id: str) -> dict:
         """Normalize memory content: strip whitespace, collapse multiple spaces, fix encoding."""
-        unit = self.store._get_by_id(memory_id)
+        unit = await self.store.get_by_id(memory_id)
         if not unit:
             return {"error": "Memory not found", "memory_id": memory_id}
 
@@ -3261,8 +3230,8 @@ class MemoryManager:
         if normalized == original:
             return {"memory_id": memory_id, "changed": False}
 
-        self.store.update_content(memory_id, normalized)
-        self.clear_cache()
+        await self.store.update_content(memory_id, normalized)
+        await self.clear_cache()
         return {
             "memory_id": memory_id,
             "changed": True,
@@ -3270,22 +3239,22 @@ class MemoryManager:
             "normalized_length": len(normalized),
         }
 
-    def batch_normalize_content(self, scope_id: str | None = None) -> dict:
+    async def batch_normalize_content(self, scope_id: str | None = None) -> dict:
         """Normalize content for all memories in a scope."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         normalized = 0
 
         for u in units:
             clean = " ".join(u.content.split()).strip()
             if clean != u.content:
-                self.store.update_content(u.memory_id, clean)
+                await self.store.update_content(u.memory_id, clean)
                 normalized += 1
 
-        self.clear_cache()
+        await self.clear_cache()
         return {"total": len(units), "normalized": normalized}
 
-    def get_priority_queue(
+    async def get_priority_queue(
         self,
         scope_id: str | None = None,
         limit: int = 20,
@@ -3295,9 +3264,9 @@ class MemoryManager:
         Combines urgency, quality, and staleness into a single priority score.
         """
         scope = scope_id or self.scope_id
-        urgency = self.compute_urgency_scores(scope, limit=50)
-        enrichment = self.suggest_enrichments(scope, limit=50)
-        stale = self.find_stale_memories(scope, stale_days=30, limit=50)
+        urgency = await self.compute_urgency_scores(scope, limit=50)
+        enrichment = await self.suggest_enrichments(scope, limit=50)
+        stale = await self.find_stale_memories(scope, stale_days=30, limit=50)
 
         # Build combined priority map.
         priority_map: dict[str, dict] = {}
@@ -3326,7 +3295,7 @@ class MemoryManager:
         items = sorted(priority_map.values(), key=lambda x: x["priority"], reverse=True)
         return items[:limit]
 
-    def apply_quality_gate(self, content: str, memory_type: str | None = None) -> dict:
+    async def apply_quality_gate(self, content: str, memory_type: str | None = None) -> dict:
         """Apply quality gates to validate memory content before ingestion.
 
         Returns pass/fail with specific gate results.
@@ -3373,13 +3342,13 @@ class MemoryManager:
             "content_preview": content[:80],
         }
 
-    def get_importance_histogram(self, scope_id: str | None = None, buckets: int = 10) -> dict:
+    async def get_importance_histogram(self, scope_id: str | None = None, buckets: int = 10) -> dict:
         """Get importance distribution as a histogram for operators.
 
         Returns bucket counts for [0.0-0.1), [0.1-0.2), ..., [0.9-1.0].
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         histogram: dict[str, int] = {}
         bucket_size = 1.0 / buckets
         for i in range(buckets):
@@ -3395,7 +3364,7 @@ class MemoryManager:
             histogram[label] = histogram.get(label, 0) + 1
         return {"histogram": histogram, "total": len(units)}
 
-    def run_maintenance(self, scope_id: str | None = None) -> dict:
+    async def run_maintenance(self, scope_id: str | None = None) -> dict:
         """Run a full maintenance cycle: expire, consolidate, clean orphans, compact.
 
         Returns a summary of all actions taken.
@@ -3404,11 +3373,11 @@ class MemoryManager:
         results: dict = {"scope_id": scope}
 
         # 1. Expire TTL-stale memories.
-        expired = self.expire_stale(scope)
+        expired = await self.expire_stale(scope)
         results["expired"] = expired
 
         # 2. Consolidate (dedup, near-dedup, decay).
-        consolidation = self.consolidator.consolidate(scope)
+        consolidation = await self.consolidator.consolidate(scope)
         results["consolidation"] = consolidation
 
         # 3. Apply typed retention policy.
@@ -3416,11 +3385,11 @@ class MemoryManager:
         results["retention_archived"] = retention["archived"]
 
         # 4. Clean orphaned references.
-        orphans = self.store.cleanup_orphans()
+        orphans = await self.store.cleanup_orphans()
         results["orphans_removed"] = orphans["total_removed"]
 
         # 5. Garbage collect superseded memories.
-        gc = self.store.garbage_collect(scope)
+        gc = await self.store.garbage_collect(scope)
         results["gc_removed"] = gc.get("removed", 0)
 
         # 6. Compact the database.
@@ -3430,22 +3399,22 @@ class MemoryManager:
         self._notify("maintenance", **results)
         return results
 
-    def sample_memories(self, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
+    async def sample_memories(self, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
         """Return a random sample of active memories for exploration."""
         scope = scope_id or self.scope_id
-        return self.store.sample_memories(scope, count)
+        return await self.store.sample_memories(scope, count)
 
-    def get_api_status(self, scope_id: str | None = None) -> dict:
+    async def get_api_status(self, scope_id: str | None = None) -> dict:
         """Get a comprehensive, API-ready status summary.
 
         Returns a JSON-serializable dict combining store stats, health,
         policy state, and feature usage indicators.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
-        health = self.store.compute_health_score(scope)
-        db_info = self.store.get_db_size()
-        integrity = self.store.validate_integrity()
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        health = await self.store.compute_health_score(self.user_id, scope)
+        db_info = await self.store.get_db_size()
+        integrity = await self.store.validate_integrity()
 
         type_counts: dict[str, int] = {}
         pinned = 0
@@ -3464,7 +3433,7 @@ class MemoryManager:
 
         return {
             "scope_id": scope,
-            "schema_version": self.store.get_schema_version(),
+            "schema_version": "postgres",
             "active_count": len(units),
             "type_distribution": type_counts,
             "health": health,
@@ -3484,12 +3453,12 @@ class MemoryManager:
             "embedder": self.get_embedder_info(),
         }
 
-    def get_optimization_hints(self, scope_id: str | None = None) -> list[str]:
+    async def get_optimization_hints(self, scope_id: str | None = None) -> list[str]:
         """Generate optimization suggestions based on current store state."""
         scope = scope_id or self.scope_id
         hints: list[str] = []
 
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return ["Store is empty — no optimizations needed."]
 
@@ -3508,17 +3477,17 @@ class MemoryManager:
             hints.append("No memories have TTL set: consider running auto-ttl to prevent unbounded growth.")
 
         # Check DB size.
-        db_info = self.store.get_db_size()
+        db_info = await self.store.get_db_size()
         if db_info["freelist_ratio"] > 0.2:
             hints.append(f"High freelist ratio ({db_info['freelist_ratio']:.0%}): run gc and compact to reclaim space.")
 
         # Check for duplicates.
-        dupes = self.store.find_duplicates(scope, threshold=0.85)
+        dupes = await self.store.find_duplicates(self.user_id, scope, threshold=0.85)
         if dupes:
             hints.append(f"{len(dupes)} near-duplicate pair(s) found: consider consolidation.")
 
         # Check integrity.
-        integrity = self.store.validate_integrity()
+        integrity = await self.store.validate_integrity()
         if not integrity["valid"]:
             hints.append(f"Integrity issues found: {', '.join(integrity['issues'][:3])}")
 
@@ -3527,15 +3496,15 @@ class MemoryManager:
 
         return hints
 
-    def generate_usage_report(self, scope_id: str | None = None) -> dict:
+    async def generate_usage_report(self, scope_id: str | None = None) -> dict:
         """Generate a comprehensive usage report for monitoring and dashboards.
 
         Combines health score, quality distribution, type breakdown,
         access patterns, link statistics, and TTL status.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
-        health = self.store.compute_health_score(scope)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        health = await self.store.compute_health_score(self.user_id, scope)
 
         type_counts: dict[str, int] = {}
         total_access = 0
@@ -3555,7 +3524,7 @@ class MemoryManager:
             if u.importance >= 0.99:
                 pinned_count += 1
             importance_sum += u.importance
-            total_links += len(self.store.get_links(u.memory_id, direction="outgoing"))
+            total_links += len(await self.store.get_links(u.memory_id, direction="outgoing"))
 
         n = max(len(units), 1)
         return {
@@ -3572,20 +3541,20 @@ class MemoryManager:
             "health_components": health.get("components", {}),
         }
 
-    def find_memory_clusters(self, scope_id: str | None = None) -> list[list[str]]:
+    async def find_memory_clusters(self, scope_id: str | None = None) -> list[list[str]]:
         """Find connected clusters of memories via links.
 
         Returns list of clusters, each cluster being a list of memory IDs.
         Isolated (unlinked) memories are not included.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         unit_ids = {u.memory_id for u in units}
 
         # Build adjacency from links.
         adj: dict[str, set[str]] = {mid: set() for mid in unit_ids}
         for mid in unit_ids:
-            links = self.store.get_links(mid, direction="both")
+            links = await self.store.get_links(mid, direction="both")
             for lnk in links:
                 other = lnk["target_id"] if lnk["direction"] == "outgoing" else lnk["source_id"]
                 if other in unit_ids:
@@ -3615,7 +3584,7 @@ class MemoryManager:
         clusters.sort(key=len, reverse=True)
         return clusters
 
-    def get_embedder_info(self) -> dict:
+    async def get_embedder_info(self) -> dict:
         """Return information about the current embedder configuration."""
         if self.embedder is None:
             return {
@@ -3637,7 +3606,7 @@ class MemoryManager:
             info["available"] = getattr(self.embedder, "is_available", False)
         return info
 
-    def re_embed_scope(
+    async def re_embed_scope(
         self,
         scope_id: str | None = None,
         embedder: "BaseEmbedder | None" = None,
@@ -3652,7 +3621,7 @@ class MemoryManager:
         if emb is None:
             return {"error": "No embedder available", "re_embedded": 0}
 
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"scope_id": scope, "re_embedded": 0, "total": 0}
 
@@ -3663,26 +3632,21 @@ class MemoryManager:
         except Exception as exc:
             return {"error": str(exc), "re_embedded": 0}
 
-        import json as _json
         re_embedded = 0
         for unit, vec in zip(units, vectors):
             if vec:
-                self.store.conn.execute(
-                    "UPDATE memories SET embedding_json = ? WHERE memory_id = ?",
-                    (_json.dumps(vec), unit.memory_id),
-                )
+                await self.store.update_embedding(unit.memory_id, vec)
                 re_embedded += 1
-        self.store.conn.commit()
-        self.clear_cache()
+        await self.clear_cache()
         return {"scope_id": scope, "re_embedded": re_embedded, "total": len(units)}
 
-    def compress_content(self, memory_id: str) -> dict:
+    async def compress_content(self, memory_id: str) -> dict:
         """Compress memory content by removing redundancy and verbosity.
 
         Applies heuristic compression: strips filler phrases, compacts
         whitespace, removes redundant words, and truncates to essential content.
         """
-        unit = self.store._get_by_id(memory_id)
+        unit = await self.store.get_by_id(memory_id)
         if not unit:
             return {"error": "Memory not found", "memory_id": memory_id}
 
@@ -3692,8 +3656,8 @@ class MemoryManager:
         if compressed == original:
             return {"memory_id": memory_id, "changed": False, "length": len(original)}
 
-        self.store.update_content(memory_id, compressed)
-        self.clear_cache()
+        await self.store.update_content(memory_id, compressed)
+        await self.clear_cache()
         return {
             "memory_id": memory_id,
             "changed": True,
@@ -3702,13 +3666,13 @@ class MemoryManager:
             "reduction_pct": round(100 * (1 - len(compressed) / max(len(original), 1)), 1),
         }
 
-    def batch_compress(self, scope_id: str | None = None) -> dict:
+    async def batch_compress(self, scope_id: str | None = None) -> dict:
         """Compress content for all memories in a scope.
 
         Returns stats on how many were compressed and total token savings.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         compressed = 0
         total_saved = 0
 
@@ -3716,14 +3680,14 @@ class MemoryManager:
             result = _compress_text(u.content)
             if result != u.content:
                 saved = len(u.content) - len(result)
-                self.store.update_content(u.memory_id, result)
+                await self.store.update_content(u.memory_id, result)
                 compressed += 1
                 total_saved += saved
 
-        self.clear_cache()
+        await self.clear_cache()
         return {"total": len(units), "compressed": compressed, "chars_saved": total_saved}
 
-    def bulk_tag_by_type(
+    async def bulk_tag_by_type(
         self,
         scope_id: str | None = None,
         type_tag_map: dict[str, list[str]] | None = None,
@@ -3741,7 +3705,7 @@ class MemoryManager:
             "procedural_observation": ["procedure"],
         }
         tag_map = type_tag_map or defaults
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         tagged = 0
 
         for u in units:
@@ -3750,13 +3714,13 @@ class MemoryManager:
                 existing = set(u.tags)
                 new_tags = [t for t in tags_to_add if t not in existing]
                 if new_tags:
-                    self.store.add_tags(u.memory_id, new_tags)
+                    await self.store.add_tags(u.memory_id, new_tags)
                     tagged += 1
 
-        self.clear_cache()
+        await self.clear_cache()
         return {"total": len(units), "tagged": tagged}
 
-    def analyze_retention_effectiveness(self, scope_id: str | None = None) -> dict:
+    async def analyze_retention_effectiveness(self, scope_id: str | None = None) -> dict:
         """Analyze how well retention policies are working.
 
         Measures: archived vs active ratio, access patterns before archival,
@@ -3765,31 +3729,27 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        active = self.store.list_active(self.user_id, scope, limit=5000)
-        all_rows = self.store.conn.execute(
-            "SELECT status, importance, access_count, created_at, updated_at FROM memories WHERE scope_id = ?",
-            (scope,),
-        ).fetchall()
+        active = await self.store.list_active(self.user_id, scope, limit=5000)
+        analytics = await self.store.get_scope_analytics(self.user_id, scope)
 
-        active_count = len(active)
-        archived_count = sum(1 for r in all_rows if r["status"] == "archived")
-        superseded_count = sum(1 for r in all_rows if r["status"] == "superseded")
-        total = len(all_rows)
+        active_count = analytics.get("active", 0)
+        archived_count = analytics.get("archived", 0)
+        superseded_count = analytics.get("superseded", 0)
+        total = analytics.get("total", 0)
 
-        # Average importance of archived vs active.
-        active_imp = [r["importance"] for r in all_rows if r["status"] == "active"]
-        archived_imp = [r["importance"] for r in all_rows if r["status"] == "archived"]
-
-        # Average access count of archived.
-        archived_access = [r["access_count"] for r in all_rows if r["status"] == "archived"]
+        # Average importance / access from active units.
+        active_imp = [u.importance for u in active]
+        # Approximate archived importance / access from analytics (no individual rows)
+        archived_imp: list[float] = []
+        archived_access: list[int] = []
 
         # Average age of active memories.
         now = datetime.now(timezone.utc)
         active_ages = []
-        for r in all_rows:
-            if r["status"] == "active" and r["created_at"]:
+        for u in active:
+            if u.created_at:
                 try:
-                    created = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                    created = datetime.fromisoformat(u.created_at.replace("Z", "+00:00"))
                     active_ages.append((now - created).days)
                 except (ValueError, TypeError):
                     pass
@@ -3810,7 +3770,7 @@ class MemoryManager:
             ) else "review_needed",
         }
 
-    def get_memory_growth_rate(self, scope_id: str | None = None, window_days: int = 30) -> dict:
+    async def get_memory_growth_rate(self, scope_id: str | None = None, window_days: int = 30) -> dict:
         """Compute memory growth rate over a time window.
 
         Returns memories added per day and projected growth.
@@ -3821,12 +3781,8 @@ class MemoryManager:
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(days=window_days)).isoformat()
 
-        total_active = len(self.store.list_active(self.user_id, scope, limit=5000))
-        recent_rows = self.store.conn.execute(
-            "SELECT COUNT(*) as cnt FROM memories WHERE scope_id = ? AND created_at >= ?",
-            (scope, cutoff),
-        ).fetchone()
-        recent_count = recent_rows["cnt"] if recent_rows else 0
+        total_active = len(await self.store.list_active(self.user_id, scope, limit=5000))
+        recent_count = await self.store.count_memories_since(self.user_id, scope, cutoff)
 
         rate_per_day = round(recent_count / max(window_days, 1), 2)
         projected_30d = round(rate_per_day * 30)
@@ -3842,7 +3798,7 @@ class MemoryManager:
             "projected_90d": projected_90d,
         }
 
-    def auto_deduplicate(
+    async def auto_deduplicate(
         self,
         scope_id: str | None = None,
         threshold: float = 0.85,
@@ -3854,14 +3810,14 @@ class MemoryManager:
         importance (or more recent if tied). Respects pinned memories.
         """
         scope = scope_id or self.scope_id
-        duplicates = self.store.find_duplicates(scope, threshold=threshold)
+        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=threshold)
         archived = 0
         pairs = []
 
         for dup in duplicates:
             id_a, id_b = dup["id_a"], dup["id_b"]
-            unit_a = self.store._get_by_id(id_a)
-            unit_b = self.store._get_by_id(id_b)
+            unit_a = await self.store.get_by_id(id_a)
+            unit_b = await self.store.get_by_id(id_b)
             if not unit_a or not unit_b:
                 continue
             if unit_a.status != "active" or unit_b.status != "active":
@@ -3882,10 +3838,10 @@ class MemoryManager:
 
             pairs.append({"keep": keep, "remove": remove, "similarity": dup["similarity"]})
             if not dry_run:
-                self.store.bulk_archive([remove])
+                await self.store.bulk_archive([remove])
                 archived += 1
 
-        self.clear_cache()
+        await self.clear_cache()
         return {
             "scope_id": scope,
             "duplicates_found": len(pairs),
@@ -3894,14 +3850,14 @@ class MemoryManager:
             "pairs": pairs[:20],  # Cap detail output.
         }
 
-    def forecast_capacity(
+    async def forecast_capacity(
         self,
         scope_id: str | None = None,
         quota: int = 1000,
     ) -> dict:
         """Project when a scope will reach its quota based on growth rate."""
         scope = scope_id or self.scope_id
-        growth = self.get_memory_growth_rate(scope, window_days=30)
+        growth = await self.get_memory_growth_rate(scope, window_days=30)
         current = growth["current_active"]
         rate = growth["rate_per_day"]
 
@@ -3927,7 +3883,7 @@ class MemoryManager:
             "rate_per_day": rate,
         }
 
-    def export_audit_trail(
+    async def export_audit_trail(
         self,
         scope_id: str | None = None,
         limit: int = 1000,
@@ -3937,25 +3893,10 @@ class MemoryManager:
         Returns chronologically ordered events with memory IDs, types, and timestamps.
         """
         scope = scope_id or self.scope_id
-        rows = self.store.conn.execute(
-            """SELECT event_type, memory_id, timestamp, detail
-               FROM memory_events
-               WHERE scope_id = ?
-               ORDER BY timestamp DESC
-               LIMIT ?""",
-            (scope, limit),
-        ).fetchall()
-        return [
-            {
-                "event_type": row["event_type"],
-                "memory_id": row["memory_id"],
-                "timestamp": row["timestamp"],
-                "detail": row["detail"],
-            }
-            for row in rows
-        ]
+        events = await self.store.get_event_log(scope_id=scope, limit=limit)
+        return events
 
-    def generate_action_plan(
+    async def generate_action_plan(
         self,
         scope_id: str | None = None,
     ) -> dict:
@@ -3969,7 +3910,7 @@ class MemoryManager:
         actions = []
 
         # 1. Duplicates to merge.
-        duplicates = self.store.find_duplicates(scope, threshold=0.85)
+        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=0.85)
         if duplicates:
             actions.append({
                 "action": "deduplicate",
@@ -3980,7 +3921,7 @@ class MemoryManager:
             })
 
         # 2. Stale memories.
-        stale = self.find_stale_memories(scope, stale_days=60, limit=50)
+        stale = await self.find_stale_memories(scope, stale_days=60, limit=50)
         if stale:
             actions.append({
                 "action": "review_stale",
@@ -3991,7 +3932,7 @@ class MemoryManager:
             })
 
         # 3. Enrichment needed.
-        enrichments = self.suggest_enrichments(scope, limit=20)
+        enrichments = await self.suggest_enrichments(scope, limit=20)
         if enrichments:
             actions.append({
                 "action": "enrich",
@@ -4002,7 +3943,7 @@ class MemoryManager:
             })
 
         # 4. Compression opportunities.
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         compressible = sum(1 for u in units if len(u.content) > 200)
         if compressible > 0:
             actions.append({
@@ -4014,7 +3955,7 @@ class MemoryManager:
             })
 
         # 5. Type balance.
-        balance = self.analyze_type_balance(scope)
+        balance = await self.analyze_type_balance(scope)
         if balance.get("suggestions"):
             actions.append({
                 "action": "rebalance_types",
@@ -4028,7 +3969,7 @@ class MemoryManager:
             })
 
         # 6. Integrity check.
-        integrity = self.store.validate_integrity()
+        integrity = await self.store.validate_integrity()
         if not integrity.get("valid"):
             actions.append({
                 "action": "fix_integrity",
@@ -4048,7 +3989,7 @@ class MemoryManager:
             "actions": actions,
         }
 
-    def search_grouped(
+    async def search_grouped(
         self,
         query_text: str,
         scope_id: str | None = None,
@@ -4065,7 +4006,7 @@ class MemoryManager:
             query_text=query_text,
             top_k=limit,
         )
-        hits = self.retriever.retrieve(query)
+        hits = await self.retriever.retrieve(query)
         groups: dict[str, list[dict]] = {}
 
         for hit in hits:
@@ -4092,7 +4033,7 @@ class MemoryManager:
             "groups": {k: {"count": len(v), "results": v} for k, v in groups.items()},
         }
 
-    def bookmark_memories(
+    async def bookmark_memories(
         self,
         memory_ids: list[str],
         bookmark_tag: str = "bookmarked",
@@ -4103,20 +4044,20 @@ class MemoryManager:
         """
         tagged = 0
         for mid in memory_ids:
-            unit = self.store._get_by_id(mid)
+            unit = await self.store.get_by_id(mid)
             if unit and bookmark_tag not in unit.tags:
-                self.store.add_tags(mid, [bookmark_tag])
+                await self.store.add_tags(mid, [bookmark_tag])
                 tagged += 1
         return {"tagged": tagged, "total": len(memory_ids)}
 
-    def get_bookmarks(
+    async def get_bookmarks(
         self,
         scope_id: str | None = None,
         bookmark_tag: str = "bookmarked",
     ) -> list[dict]:
         """Get all bookmarked memories in a scope."""
         scope = scope_id or self.scope_id
-        units = self.store.search_by_tag(scope, bookmark_tag)
+        units = await self.store.search_by_tag(self.user_id, scope, bookmark_tag)
         return [
             {
                 "memory_id": u.memory_id,
@@ -4128,7 +4069,7 @@ class MemoryManager:
             for u in units
         ]
 
-    def compare_snapshots(
+    async def compare_snapshots(
         self,
         scope_id: str | None = None,
     ) -> dict:
@@ -4137,8 +4078,8 @@ class MemoryManager:
         Returns delta information showing what changed since last snapshot.
         """
         scope = scope_id or self.scope_id
-        current_stats = self.store.get_stats(scope)
-        trends = self.store.get_stats_trend(scope, limit=2)
+        current_stats = await self.store.get_stats(scope)
+        trends = await self.store.get_stats_trend(scope, limit=2)
 
         if len(trends) < 1:
             return {
@@ -4163,17 +4104,17 @@ class MemoryManager:
             "delta": delta,
         }
 
-    def archive_scope(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def archive_scope(self, user_id: str, scope_id: str | None = None) -> dict:
         """Archive all active memories in a scope.
 
         Useful for retiring old scopes or preparing for scope cleanup.
         Does not touch pinned memories (importance >= 0.99).
         """
-        units = self.store.list_active(user_id, scope_id, limit=5000)
+        units = await self.store.list_active(user_id, scope_id, limit=5000)
         to_archive = [u.memory_id for u in units if u.importance < 0.99]
-        archived = self.store.bulk_archive(to_archive) if to_archive else 0
+        archived = await self.store.bulk_archive(to_archive) if to_archive else 0
         pinned_count = len(units) - len(to_archive)
-        self.clear_cache()
+        await self.clear_cache()
         return {
             "scope_id": scope_id,
             "archived": archived,
@@ -4181,7 +4122,7 @@ class MemoryManager:
             "total_before": len(units),
         }
 
-    def bulk_pin_by_criteria(
+    async def bulk_pin_by_criteria(
         self,
         scope_id: str | None = None,
         min_importance: float = 0.9,
@@ -4194,7 +4135,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         pinned = 0
         now = datetime.now(timezone.utc).isoformat()
 
@@ -4202,19 +4143,19 @@ class MemoryManager:
             if u.importance >= 0.99:
                 continue  # Already pinned.
             if u.importance >= min_importance or u.access_count >= min_access_count:
-                self.store.update_importance(u.memory_id, 0.99, now)
+                await self.store.update_importance(u.memory_id, 0.99, now)
                 pinned += 1
 
-        self.clear_cache()
+        await self.clear_cache()
         return {"scope_id": scope, "pinned": pinned, "total": len(units)}
 
-    def export_scope_yaml(self, scope_id: str | None = None) -> str:
+    async def export_scope_yaml(self, scope_id: str | None = None) -> str:
         """Export scope memories as YAML format.
 
         Returns a YAML string. Does not require external YAML library.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, scope, limit=5000)
         lines = ["# Memory Export", f"# Scope: {scope}", f"# Count: {len(units)}", "memories:"]
 
         for u in units:
@@ -4234,7 +4175,7 @@ class MemoryManager:
 
         return "\n".join(lines)
 
-    def run_system_health_check(self, scope_id: str | None = None) -> dict:
+    async def run_system_health_check(self, scope_id: str | None = None) -> dict:
         """Run a comprehensive system health check.
 
         Returns a pass/fail result with categorized findings:
@@ -4249,7 +4190,7 @@ class MemoryManager:
         checks = {}
 
         # 1. Integrity.
-        integrity = self.store.validate_integrity()
+        integrity = await self.store.validate_integrity()
         checks["integrity"] = {
             "passed": integrity.get("valid", False),
             "issues": integrity.get("issues", {}),
@@ -4258,7 +4199,7 @@ class MemoryManager:
             issues.append("Database integrity issues detected")
 
         # 2. Health score.
-        health = self.store.compute_health_score(scope)
+        health = await self.store.compute_health_score(self.user_id, scope)
         health_score = health.get("score", 0)
         checks["health_score"] = {
             "passed": health_score >= 50,
@@ -4268,7 +4209,7 @@ class MemoryManager:
             issues.append(f"Low health score: {health_score}")
 
         # 3. Stale count.
-        stale = self.find_stale_memories(scope, stale_days=90, limit=100)
+        stale = await self.find_stale_memories(scope, stale_days=90, limit=100)
         checks["staleness"] = {
             "passed": len(stale) < 10,
             "stale_count": len(stale),
@@ -4277,7 +4218,7 @@ class MemoryManager:
             issues.append(f"{len(stale)} memories stale for 90+ days")
 
         # 4. Duplicate count.
-        duplicates = self.store.find_duplicates(scope, threshold=0.90)
+        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=0.90)
         checks["duplicates"] = {
             "passed": len(duplicates) < 5,
             "duplicate_pairs": len(duplicates),
@@ -4286,7 +4227,7 @@ class MemoryManager:
             issues.append(f"{len(duplicates)} near-duplicate pairs found")
 
         # 5. DB size.
-        db_info = self.store.get_db_size()
+        db_info = await self.store.get_db_size()
         db_size_mb = db_info.get("total_bytes", 0) / (1024 * 1024)
         checks["db_size"] = {
             "passed": db_size_mb < 100,
@@ -4305,13 +4246,13 @@ class MemoryManager:
             "summary": "All checks passed" if overall_passed else f"{len(issues)} issue(s) found",
         }
 
-    def get_system_summary(self) -> dict:
+    async def get_system_summary(self) -> dict:
         """Get a comprehensive summary of the entire memory system.
 
         Combines all scopes, health, embedder, policy, and schema info
         into a single operator-friendly overview.
         """
-        scopes = self.store.list_scopes()
+        scopes = await self.store.list_scopes(self.user_id)
         scope_summaries = []
         total_active = 0
         for scope_info in scopes:
@@ -4325,7 +4266,7 @@ class MemoryManager:
             })
 
         return {
-            "schema_version": self.store.get_schema_version(),
+            "schema_version": "postgres",
             "scopes": scope_summaries,
             "scope_count": len(scopes),
             "total_active_memories": total_active,
@@ -4335,11 +4276,11 @@ class MemoryManager:
                 "max_injected_units": self.policy.max_injected_units,
                 "max_injected_tokens": self.policy.max_injected_tokens,
             },
-            "db": self.store.get_db_size(),
-            "integrity": self.store.validate_integrity(),
+            "db": await self.store.get_db_size(),
+            "integrity": await self.store.validate_integrity(),
         }
 
-    def generate_operator_report(self, scope_id: str | None = None) -> dict:
+    async def generate_operator_report(self, scope_id: str | None = None) -> dict:
         """Generate a comprehensive operator diagnostic report.
 
         Combines health check, action plan, growth rate, capacity forecast,
@@ -4355,7 +4296,7 @@ class MemoryManager:
 
         # Health check
         try:
-            report["health"] = self.run_system_health_check(scope_id=scope)
+            report["health"] = await self.run_system_health_check(scope_id=scope)
         except Exception as exc:
             report["health"] = {"error": str(exc)}
 
@@ -4367,7 +4308,7 @@ class MemoryManager:
 
         # Growth rate
         try:
-            report["growth_rate"] = self.get_memory_growth_rate(scope_id=scope)
+            report["growth_rate"] = await self.get_memory_growth_rate(scope_id=scope)
         except Exception as exc:
             report["growth_rate"] = {"error": str(exc)}
 
@@ -4379,19 +4320,19 @@ class MemoryManager:
 
         # Stats
         try:
-            report["stats"] = self.get_scope_stats(scope_id=scope)
+            report["stats"] = await self.get_scope_stats(scope_id=scope)
         except Exception as exc:
             report["stats"] = {"error": str(exc)}
 
         # Type balance
         try:
-            report["type_balance"] = self.analyze_type_balance(scope_id=scope)
+            report["type_balance"] = await self.analyze_type_balance(scope_id=scope)
         except Exception as exc:
             report["type_balance"] = {"error": str(exc)}
 
         # System-wide context
         try:
-            report["system"] = self.get_system_summary()
+            report["system"] = await self.get_system_summary()
         except Exception as exc:
             report["system"] = {"error": str(exc)}
 
@@ -4590,7 +4531,7 @@ class _MultiTurnContext:
         self.window = window
         self._turns: list[dict] = []
 
-    def add_turn(self, prompt_text: str, response_text: str, turn_index: int) -> None:
+    async def add_turn(self, prompt_text: str, response_text: str, turn_index: int) -> None:
         self._turns.append({
             "prompt": prompt_text,
             "response": response_text,
@@ -4599,7 +4540,7 @@ class _MultiTurnContext:
         if len(self._turns) > self.window:
             self._turns = self._turns[-self.window:]
 
-    def get_recent_context(self) -> str:
+    async def get_recent_context(self) -> str:
         """Return concatenated recent turn text for context-aware extraction."""
         parts = []
         for t in self._turns:
@@ -4609,7 +4550,7 @@ class _MultiTurnContext:
                 parts.append(t["response"])
         return " ".join(parts)
 
-    def get_accumulated_entities(self) -> list[str]:
+    async def get_accumulated_entities(self) -> list[str]:
         """Return entities mentioned across recent turns for enrichment."""
         all_entities: list[str] = []
         seen: set[str] = set()
@@ -4621,7 +4562,7 @@ class _MultiTurnContext:
                     all_entities.append(ent)
         return all_entities[:12]
 
-    def has_continuation_pattern(self, prompt_text: str) -> bool:
+    async def has_continuation_pattern(self, prompt_text: str) -> bool:
         """Detect if the current turn continues a prior topic (e.g., pronoun references)."""
         continuation_markers = [
             "also", "and also", "another thing", "in addition",
@@ -4639,7 +4580,7 @@ class _MultiTurnContext:
         return False
 
 
-def _extract_memory_units_for_turn(
+async def _extract_memory_units_for_turn(
     user_id: str,
     scope_id: str,
     session_id: str,
@@ -4654,8 +4595,8 @@ def _extract_memory_units_for_turn(
     entities = _extract_entities(text)
 
     # Enrich entities from multi-turn context when the turn is a continuation.
-    if multi_turn_context is not None and multi_turn_context.has_continuation_pattern(prompt_text):
-        context_entities = multi_turn_context.get_accumulated_entities()
+    if multi_turn_context is not None and await multi_turn_context.has_continuation_pattern(prompt_text):
+        context_entities = await multi_turn_context.get_accumulated_entities()
         seen_ent = set(entities)
         for ent in context_entities:
             if ent not in seen_ent and len(entities) < 12:
@@ -4665,8 +4606,8 @@ def _extract_memory_units_for_turn(
     # Try extraction with context-enriched text for continuation turns.
     extraction_prompt = prompt_text
     extraction_response = response_text
-    if multi_turn_context is not None and multi_turn_context.has_continuation_pattern(prompt_text):
-        recent_ctx = multi_turn_context.get_recent_context()
+    if multi_turn_context is not None and await multi_turn_context.has_continuation_pattern(prompt_text):
+        recent_ctx = await multi_turn_context.get_recent_context()
         if recent_ctx:
             extraction_prompt = f"{recent_ctx} {prompt_text}"
 
@@ -4961,7 +4902,7 @@ def _enforce_type_diversity(
     return primary + overflow
 
 
-def _detect_conflicts(
+async def _detect_conflicts(
     new_units: list[MemoryUnit],
     store: MemoryStore,
     user_id: str,
@@ -4974,7 +4915,7 @@ def _detect_conflicts(
     with existing memories but have different content, which may indicate
     contradictory information.
     """
-    existing = store.list_active(user_id, scope_id, limit=500)
+    existing = await store.list_active(user_id, scope_id, limit=500)
     if not existing:
         return []
 
@@ -5010,14 +4951,14 @@ def _detect_conflicts(
     return conflicts
 
 
-def _dedup_against_store(
+async def _dedup_against_store(
     units: list[MemoryUnit],
     store: MemoryStore,
     user_id: str,
     scope_id: str | None,
 ) -> list[MemoryUnit]:
     """Remove units whose content already exists in the active store."""
-    existing = store.list_active(user_id, scope_id, limit=500)
+    existing = await store.list_active(user_id, scope_id, limit=500)
     if not existing:
         return units
     existing_content = {
