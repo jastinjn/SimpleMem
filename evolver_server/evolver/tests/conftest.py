@@ -28,13 +28,10 @@ Three sources of nondeterminism are pinned throughout this suite:
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from evolver_server.evolver.models import MemoryType, MemoryUnit
 from evolver_server.evolver.store import MemoryStore

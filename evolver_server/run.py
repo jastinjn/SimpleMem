@@ -1,6 +1,6 @@
 """Launcher for the Evolver API server.
 
-    uv run python evolver_server/run.py --port 8100
+    uv run python run.py --port 8100
 
 Uses the uvicorn import-string form so ``--reload`` works.
 """
@@ -8,18 +8,10 @@ Uses the uvicorn import-string form so ``--reload`` works.
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-# Ensure the repo root is importable whether launched as a script
-# (`python evolver_server/run.py`) or a module (`python -m evolver_server.run`).
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+import uvicorn
 
-import uvicorn  # noqa: E402
-
-from evolver_server.config import get_settings  # noqa: E402
+from evolver_server.config import get_settings
 
 
 def main() -> None:
@@ -42,7 +34,6 @@ def main() -> None:
         host=args.host,
         port=args.port,
         reload=args.reload,
-        app_dir=_REPO_ROOT,
     )
 
 
