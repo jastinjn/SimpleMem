@@ -9,6 +9,7 @@ simplemem/       # Installable package
   core/          # MemoryBuilder, HybridRetriever, AnswerGenerator (text runtime)
   text/          # SimpleMemSystem — wires core into the text backend
   evolver/       # MemoryManager runtime + offline EvolutionEngine
+  evolver/tests/ # Deterministic unit + integration tests (no API key required)
   multimodal/    # OmniSimpleMem: image/audio/video memory
 cross/           # SimpleMem-Cross: persistent cross-conversation memory
 MCP/             # Production MCP + HTTP server (FastAPI, port 8000)
@@ -20,23 +21,37 @@ OmniSimpleMem/   # Upstream research subproject — mirrored into simplemem/mult
 
 ```bash
 cp config.py.example config.py   # set OPENAI_API_KEY; never commit config.py
-pip install -e .                 # core; add [server], [benchmark], or [all] as needed
+
+# Install uv once (https://docs.astral.sh/uv/getting-started/installation/)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install the project — uv creates .venv automatically, no activate needed
+uv sync --extra server --extra dev   # core + MCP server + test deps
+
+# Run anything in the managed env
+uv run python MCP/run.py             # MCP server (localhost:8000)
+uv run python test_locomo10.py       # LoCoMo-10 benchmark (needs API key)
+
+# Add / upgrade a dependency
+uv add some-package
+uv add --optional server some-server-dep
 ```
 
 Settings resolve: `config.py` → env var → built-in default. Key vars: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL` (default `gpt-4.1-mini`), `EMBEDDING_MODEL` (default `Qwen/Qwen3-Embedding-0.6B`, local), `LANCEDB_PATH` (default `./lancedb_data`). For the MCP server copy `.env.example` to `.env`.
 
+The evolver layer does not require an API key — it defaults to `HashingEmbedder` (SHA-256, deterministic, no network).
+
 ## Tests & Running
 
 ```bash
-pytest tests/           # vector store unit tests (no API key)
-pytest cross/tests/     # SimpleMem-Cross tests (no API key, real SQLite)
+uv run pytest tests/                        # vector store unit tests (no API key)
+uv run pytest cross/tests/                  # SimpleMem-Cross tests (no API key, real SQLite)
+uv run pytest simplemem/evolver/tests/ -v   # evolver unit + integration tests (no API key)
 
-cd MCP && python run.py                          # MCP server (localhost:8000)
-python test_locomo10.py                          # LoCoMo-10 benchmark (needs API key)
-cd EvolveMem && python run_evolution.py ...      # paper-faithful evolution
+uv run python MCP/run.py                    # MCP server (localhost:8000)
+uv run python test_locomo10.py              # LoCoMo-10 benchmark (needs API key)
+cd EvolveMem && python run_evolution.py ... # paper-faithful evolution (own requirements.txt)
 ```
-
-No unit tests exist for `simplemem/evolver/`.
 
 ## Architecture
 
@@ -55,3 +70,4 @@ No unit tests exist for `simplemem/evolver/`.
 - The MCP server's SQLite (`MCP/server/database/user_store.py`) is for auth only — unrelated to `MemoryStore`.
 - `simplemem/multimodal/evolution/` (MetaController, StrategyOptimizer) is a separate online evolution system from OmniSimpleMem, unrelated to `EvolutionEngine`.
 - Do not edit `EvolveMem/` or `OmniSimpleMem/` directly — they are upstream mirrors.
+- Packaging: `pyproject.toml` (root) is the sole packaging source; `setup.py` has been removed. Bump `version` in both `pyproject.toml` and `simplemem/__init__.py` on release.
