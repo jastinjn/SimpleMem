@@ -1925,14 +1925,10 @@ class MemoryManager:
 
             # Content pattern-based tags.
             content_lower = u.content.lower()
-            if any(w in content_lower for w in ["bug", "fix", "error", "issue"]):
-                suggested_tags.append("bugfix")
-            if any(w in content_lower for w in ["config", "setting", "environment"]):
-                suggested_tags.append("configuration")
-            if any(w in content_lower for w in ["deploy", "release", "production"]):
-                suggested_tags.append("deployment")
-            if any(w in content_lower for w in ["test", "spec", "assert"]):
-                suggested_tags.append("testing")
+            if any(w in content_lower for w in ["score", "marks", "grade", "band", "level"]) or re.search(r'\bl\d+\b', content_lower):
+                suggested_tags.append("scoring")
+            if any(w in content_lower for w in ["feedback", "comment", "annotation", "note"]):
+                suggested_tags.append("feedback")
 
             if suggested_tags:
                 suggestions.append({
@@ -4418,28 +4414,6 @@ def _extract_topics(prompt_text: str) -> list[str]:
         if len(topics) >= 10:
             break
 
-    # Multi-word technical terms (common patterns like "database migration").
-    text_lower = prompt_text.lower()
-    tech_patterns = [
-        r"\b(api\s+\w+)",
-        r"\b(database\s+\w+)",
-        r"\b(test(?:ing)?\s+\w+)",
-        r"\b(deploy(?:ment)?\s+\w+)",
-        r"\b(auth(?:entication)?\s+\w+)",
-        r"\b(error\s+handling)",
-        r"\b(code\s+review)",
-        r"\b(pull\s+request)",
-        r"\b(ci[\s/]cd)",
-        r"\b(machine\s+learning)",
-    ]
-    for pat in tech_patterns:
-        match = re.search(pat, text_lower)
-        if match and len(topics) < 12:
-            term = match.group(1).strip()
-            if term not in seen:
-                topics.append(term)
-                seen.add(term)
-
     return topics[:12]
 
 
@@ -4518,9 +4492,9 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
     text = f"{prompt_text}\n{response_text}".lower()
     if "i prefer" in text or "my preference" in text or "prefer " in text:
         return MemoryType.PREFERENCE
-    if "project uses" in text or "we use" in text or "tech stack" in text:
-        return MemoryType.PROJECT_STATE
-    if "remember that" in text or "always keep in mind" in text:
+    if "always " in text or "never " in text or "make sure" in text or "do not " in text:
+        return MemoryType.PROCEDURAL_OBSERVATION
+    if "remember that" in text or "keep in mind" in text or "note that" in text:
         return MemoryType.SEMANTIC
     return MemoryType.EPISODIC
 
@@ -4681,29 +4655,18 @@ def _extract_pattern_facts(prompt_text: str, response_text: str) -> list[dict]:
             ],
         ),
         (
-            MemoryType.PROJECT_STATE,
-            0.88,
-            0.8,
-            [
-                r"\b(?:this|the) project uses (?P<fact>[^.!\n]{3,180})",
-                r"\bwe use (?P<fact>[^.!\n]{3,180})",
-                r"\bour stack is (?P<fact>[^.!\n]{3,180})",
-                r"\bthe codebase (?:is|uses|has) (?P<fact>[^.!\n]{3,180})",
-                r"\bour (?:team|org) (?:uses|runs|has) (?P<fact>[^.!\n]{3,180})",
-                r"\bwe(?:'re| are) (?:using|running|deploying) (?P<fact>[^.!\n]{3,180})",
-            ],
-        ),
-        (
             MemoryType.PROCEDURAL_OBSERVATION,
             0.8,
             0.75,
             [
-                r"\balways (?P<fact>[^.!\n]{3,180})",
-                r"\bwhen you work on this repo[, ]+(?P<fact>[^.!\n]{3,180})",
-                r"\bthe workflow is to (?P<fact>[^.!\n]{3,180})",
-                r"\bnever (?P<fact>[^.!\n]{3,180})",
+                r"\balways (?P<fact>\w[^.!\n]{5,180})",
+                r"\bnever (?P<fact>\w[^.!\n]{5,180})",
+                r"\bdo not (?P<fact>\w[^.!\n]{5,180})",
+                r"\bavoid (?P<fact>\w[^.!\n]{5,180})",
                 r"\bmake sure (?:to |that )?(?P<fact>[^.!\n]{3,180})",
                 r"\bdon(?:'t| not) forget to (?P<fact>[^.!\n]{3,180})",
+                r"\bwhen \w+ing[, ]+(?P<fact>[^.!\n]{3,180})",
+                r"\bthe (?:marking|grading|assessment) (?:criteria|rubric|process) is (?P<fact>[^.!\n]{3,180})",
             ],
         ),
         (
@@ -4753,17 +4716,6 @@ def _extract_pattern_facts(prompt_text: str, response_text: str) -> list[dict]:
     response_normalized = _normalize_space(response_text)
     response_patterns = [
         (
-            MemoryType.PROJECT_STATE,
-            0.78,
-            0.68,
-            [
-                r"\bthe project (?:is|uses|has) (?P<fact>[^.!\n]{3,180})",
-                r"\bthis (?:repo|repository|codebase) (?:is|uses|has) (?P<fact>[^.!\n]{3,180})",
-                r"\bthe (?:current|existing) (?:setup|config|configuration) (?:is|uses) (?P<fact>[^.!\n]{3,180})",
-                r"\bthe (?:default|recommended) (?:approach|method|way) is (?P<fact>[^.!\n]{3,180})",
-            ],
-        ),
-        (
             MemoryType.SEMANTIC,
             0.75,
             0.65,
@@ -4781,7 +4733,9 @@ def _extract_pattern_facts(prompt_text: str, response_text: str) -> list[dict]:
             [
                 r"\byou should (?:always |)(?P<fact>[^.!\n]{3,180})",
                 r"\bbest practice is to (?P<fact>[^.!\n]{3,180})",
-                r"\bavoid (?P<fact>[^.!\n]{3,180})",
+                r"\bavoid (?P<fact>\w[^.!\n]{5,180})",
+                r"\bdo not (?P<fact>\w[^.!\n]{5,180})",
+                r"\bnever (?P<fact>\w[^.!\n]{5,180})",
             ],
         ),
     ]

@@ -40,7 +40,6 @@ class MemoryRetriever:
             hits = await self._retrieve_hybrid(query)
             logger.info("[Retriever] mode=hybrid scope=%s hits=%d", query.scope_id, len(hits))
             return hits
-        # Try expanded query if direct keyword search yields too few results.
         limit = min(query.top_k, self.policy.max_injected_units)
         hits = await self.store.search_keyword(
             query.user_id,
@@ -49,28 +48,6 @@ class MemoryRetriever:
             limit=limit,
         )
         expanded_flag = False
-        if len(hits) < max(2, limit // 2):
-            expanded = _expand_query(query.query_text)
-            if expanded != query.query_text:
-                expanded_flag = True
-                extra = await self.store.search_keyword(
-                    query.user_id,
-                    query.scope_id,
-                    query_text=expanded,
-                    limit=limit,
-                )
-                seen = {h.unit.memory_id for h in hits}
-                for h in extra:
-                    if h.unit.memory_id not in seen:
-                        # Slight score penalty for expansion-only matches.
-                        hits.append(MemorySearchHit(
-                            unit=h.unit,
-                            score=h.score * 0.85,
-                            matched_terms=h.matched_terms,
-                        ))
-                        seen.add(h.unit.memory_id)
-                hits.sort(key=lambda h: (h.score, h.unit.updated_at), reverse=True)
-                hits = hits[:limit]
         # Apply tag-based boosting if context tags are provided.
         if query.context_tags:
             hits = _apply_tag_boost(hits, query.context_tags)
@@ -257,48 +234,6 @@ def _tokenize(text: str) -> list[str]:
         out.append("".join(token))
     return out
 
-
-_QUERY_EXPANSIONS: dict[str, list[str]] = {
-    "db": ["database"],
-    "database": ["db"],
-    "auth": ["authentication", "authorization"],
-    "authentication": ["auth"],
-    "authorization": ["auth"],
-    "config": ["configuration", "settings"],
-    "configuration": ["config", "settings"],
-    "settings": ["config", "configuration"],
-    "api": ["endpoint", "rest"],
-    "endpoint": ["api"],
-    "test": ["testing", "tests"],
-    "testing": ["test", "tests"],
-    "deploy": ["deployment"],
-    "deployment": ["deploy"],
-    "js": ["javascript"],
-    "javascript": ["js"],
-    "ts": ["typescript"],
-    "typescript": ["ts"],
-    "py": ["python"],
-    "python": ["py"],
-    "repo": ["repository"],
-    "repository": ["repo"],
-    "ci": ["continuous integration", "pipeline"],
-    "cd": ["continuous deployment"],
-    "k8s": ["kubernetes"],
-    "kubernetes": ["k8s"],
-}
-
-
-def _expand_query(query_text: str) -> str:
-    """Expand query terms with common synonyms/abbreviations for better recall."""
-    terms = _tokenize(query_text)
-    expanded: list[str] = list(terms)
-    for term in terms:
-        synonyms = _QUERY_EXPANSIONS.get(term, [])
-        for syn in synonyms:
-            if syn not in expanded:
-                expanded.append(syn)
-    result = " ".join(expanded)
-    return result
 
 
 def _estimate_recency_bonus(updated_at: str, recent_bonus_hours: int) -> float:

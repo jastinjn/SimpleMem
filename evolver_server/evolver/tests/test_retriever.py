@@ -62,38 +62,6 @@ class TestKeywordRetrieval:
 
 
 # ---------------------------------------------------------------------------
-# Query expansion
-# ---------------------------------------------------------------------------
-
-class TestQueryExpansion:
-    async def test_expansion_triggers_when_few_direct_hits(self, store):
-        u_db = _make_unit(
-            memory_id="db-001", scope_id="expand",
-            content="the database system is configured",
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([u_db])
-        policy = _policy(max_injected_units=6)
-        r = MemoryRetriever(store, policy=policy, retrieval_mode="keyword")
-        hits = await r.retrieve(_query("db", scope_id="expand"))
-        ids = {h.unit.memory_id for h in hits}
-        assert "db-001" in ids
-
-    async def test_expansion_only_hits_get_score_penalty(self, store):
-        expanded_only = _make_unit(
-            memory_id="exp-only-001", scope_id="exp2",
-            content="continuous integration pipeline runs on merge",
-            importance=0.5,
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([expanded_only])
-        policy = _policy(max_injected_units=6)
-        r = MemoryRetriever(store, policy=policy, retrieval_mode="keyword")
-        hits = await r.retrieve(_query("ci", scope_id="exp2"))
-        assert any(h.unit.memory_id == "exp-only-001" for h in hits)
-        hit = next(h for h in hits if h.unit.memory_id == "exp-only-001")
-        assert hit.score == pytest.approx(0.425, abs=1e-4)
-
 
 # ---------------------------------------------------------------------------
 # Embedding mode
