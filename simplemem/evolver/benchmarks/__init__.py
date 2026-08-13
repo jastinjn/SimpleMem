@@ -14,8 +14,8 @@ from .base import (
     BenchmarkAdapter,
     BenchmarkSample,
     QuestionMeta,
-    register_adapter,
     get_adapter,
+    register_adapter,
 )
 from .locomo import LoCoMoAdapter
 from .longmemeval import LongMemEvalAdapter

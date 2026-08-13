@@ -6,7 +6,7 @@ import uuid
 
 from .config import EvolveMemConfig
 from .consolidator import MemoryConsolidator
-from .embeddings import BaseEmbedder, HashingEmbedder, create_embedder
+from .embeddings import BaseEmbedder, create_embedder
 from .metrics import summarize_memory_store
 from .models import MemoryQuery, MemoryStatus, MemoryType, MemoryUnit, utc_now_iso
 from .policy import MemoryPolicy
@@ -2405,7 +2405,7 @@ class MemoryManager:
         for u in units:
             links = self.store.get_links(u.memory_id, direction="both")
             conn_count = len(links)
-            total_links += len([l for l in links if l["direction"] == "outgoing"])
+            total_links += len([lnk for lnk in links if lnk["direction"] == "outgoing"])
 
             if conn_count > 0:
                 linked_memories.add(u.memory_id)

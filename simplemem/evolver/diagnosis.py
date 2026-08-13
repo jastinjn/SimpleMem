@@ -536,7 +536,8 @@ class MemoryDiagnostics:
                 except (TypeError, ValueError):
                     continue
                 lo, hi = self.INT_RANGES[key]
-                proposed = max(lo, min(iv, hi)); valid = True
+                proposed = max(lo, min(iv, hi))
+                valid = True
             elif key in self.FLOAT_RANGES:
                 try:
                     fv = float(val) if val is not None else None
@@ -550,11 +551,14 @@ class MemoryDiagnostics:
                 valid = True
             elif key in self.ENUM_VALUES:
                 if isinstance(val, str) and val in self.ENUM_VALUES[key]:
-                    proposed = val; valid = True
+                    proposed = val
+                    valid = True
             elif key in self.BOOL_FIELDS:
-                proposed = bool(val); valid = True
+                proposed = bool(val)
+                valid = True
             elif key in current_config:
-                proposed = val; valid = True
+                proposed = val
+                valid = True
 
             if valid and can_change(key, proposed):
                 new_config[key] = proposed
@@ -781,7 +785,7 @@ class MemoryDiagnostics:
         # Match cookbook recipes against the current failure profile. The
         # matched set is surfaced to the LLM as "available capability cards"
         # the evolution can autonomously invoke.
-        from .evolution_cookbook import match_recipes, format_recipes_for_prompt
+        from .evolution_cookbook import format_recipes_for_prompt, match_recipes
         report_fields_for_recipes = {
             "category_f1": report.category_f1,
             "abstention_count": report.abstention_count,
@@ -819,8 +823,6 @@ class MemoryDiagnostics:
                 "'Unknown / not specified' abstentions (+5-10 pp)."
             )
         if benchmark_name == "locomo":
-            cn = {1: "SingleHop", 2: "Temporal", 3: "MultiHop",
-                  4: "OpenDomain", 5: "Adversarial"}
             for ci, name, key in [
                 (1, "SingleHop", "locomo_cat1_single_fact"),
                 (2, "Temporal", "locomo_cat2_temporal_format"),

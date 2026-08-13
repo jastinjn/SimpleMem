@@ -8,7 +8,8 @@ import threading
 from pathlib import Path
 from typing import Iterable
 
-from .models import MemorySearchHit, MemoryStatus, MemoryType, MemoryUnit, utc_now_iso as _utc_now_iso
+from .models import MemorySearchHit, MemoryStatus, MemoryType, MemoryUnit
+from .models import utc_now_iso as _utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -730,8 +731,6 @@ class MemoryStore:
 
     def get_scope_analytics(self, scope_id: str) -> dict:
         """Generate analytics for a scope including growth, access, and quality metrics."""
-        from datetime import datetime as _dt, timezone as _tz
-
         with self._lock:
             all_rows = self.conn.execute(
                 "SELECT * FROM memories WHERE scope_id = ?",
@@ -742,7 +741,6 @@ class MemoryStore:
             return {"total": 0}
 
         units = [self._row_to_unit(row) for row in all_rows]
-        now = _dt.now(_tz.utc)
 
         active = [u for u in units if u.status == MemoryStatus.ACTIVE]
         superseded = [u for u in units if u.status == MemoryStatus.SUPERSEDED]
@@ -901,7 +899,8 @@ class MemoryStore:
         Factors: access coverage, importance distribution, type diversity,
         freshness, and absence of stale/expired memories.
         """
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
 
         units = self.list_active(scope_id, limit=5000)
         if not units:

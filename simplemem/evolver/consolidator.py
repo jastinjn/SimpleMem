@@ -78,7 +78,6 @@ class MemoryConsolidator:
         Returns counts and details of what would happen.
         """
         units = self.store.list_active(scope_id, limit=2000)
-        now = utc_now_iso()
 
         # Stale working summaries.
         working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]

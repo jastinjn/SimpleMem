@@ -16,9 +16,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from simplemem.evolver.consolidator import MemoryConsolidator
-from simplemem.evolver.models import MemoryStatus, MemoryType, MemoryUnit
+from simplemem.evolver.models import MemoryType, MemoryUnit
 
-from .conftest import _make_store, _make_unit, create_test_units, FROZEN_NOW
+from .conftest import _make_store, _make_unit, create_test_units
 
 
 def _consolidator(store, threshold=0.80, decay_factor=0.0, **kwargs) -> MemoryConsolidator:
@@ -166,7 +166,7 @@ class TestNearDuplicateMerge:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        result = _consolidator(store, threshold=0.80).consolidate("dt")
+        _consolidator(store, threshold=0.80).consolidate("dt")
         # Cross-type merge must not happen.
         active_ids = {u.memory_id for u in store.list_active("dt")}
         assert "dt-001" in active_ids

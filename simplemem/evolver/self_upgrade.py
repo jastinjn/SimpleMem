@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .candidate import generate_policy_candidates
 from .config import EvolveMemConfig
-from .policy_store import MemoryPolicyState, MemoryPolicyStore
+from .policy_store import MemoryPolicyStore
 from .promotion import MemoryPromotionCriteria, should_promote
 from .replay import load_replay_samples, run_policy_candidate_replay, write_replay_report
 

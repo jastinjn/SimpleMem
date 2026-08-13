@@ -15,11 +15,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from simplemem.evolver.embeddings import HashingEmbedder
-from simplemem.evolver.models import MemoryQuery, MemoryType, MemoryUnit
+from simplemem.evolver.models import MemoryQuery, MemoryType
 from simplemem.evolver.policy import MemoryPolicy
 from simplemem.evolver.retriever import MemoryRetriever
 
-from .conftest import _make_store, _make_unit, create_test_units, FROZEN_NOW
+from .conftest import _make_store, _make_unit, create_test_units
 
 
 def _policy(recency_weight: float = 0.0, **kwargs) -> MemoryPolicy:

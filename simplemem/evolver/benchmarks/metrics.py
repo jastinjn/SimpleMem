@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import re
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Callable
 
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 

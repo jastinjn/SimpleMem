@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any
 
 _REGISTRY: dict[str, type["BenchmarkAdapter"]] = {}
 

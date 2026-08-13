@@ -29,8 +29,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from .diagnosis import DiagnosisReport, MemoryDiagnostics, QAResult
+from .benchmarks.base import BenchmarkAdapter
+from .diagnosis import MemoryDiagnostics, QAResult
 from .extractor import ExtractionConfig, MemoryExtractor
+from .meta_analysis import MetaEvolutionAnalyzer, MetaPlan
 from .multi_retriever import (
     MultiViewIndex,
     RetrievalConfig,
@@ -38,8 +40,6 @@ from .multi_retriever import (
     format_context,
     retrieve_multiview,
 )
-from .benchmarks.base import BenchmarkAdapter, token_f1
-from .meta_analysis import MetaEvolutionAnalyzer, MetaPlan
 
 logger = logging.getLogger(__name__)
 
@@ -584,7 +584,7 @@ class EvolutionEngine:
                         category_f1=cat_f1,
                         retrieval_config=asdict(ret_config),
                         memory_count=len(memories),
-                        diagnosis_summary=report.summary(),
+                        diagnosis_summary="",
                         improvements_applied=improvements + [
                             f"CONVERGED: {consec_noaccept} consecutive rejections"
                         ],
@@ -1412,7 +1412,7 @@ Return ONLY the JSON array: ["q1", "q2", "q3"]"""
         if not seed_hits or not hasattr(index, "seed_entity_expand"):
             return seed_hits
         try:
-            from simplemem.evolver.multi_retriever import analyze_query, RetrievedMemory
+            from simplemem.evolver.multi_retriever import RetrievedMemory, analyze_query
         except Exception:
             return seed_hits
         # Resolve seed memory indices via content prefix (same key used
@@ -1469,9 +1469,11 @@ Return ONLY the JSON array: ["q1", "q2", "q3"]"""
             si = ni = 0
             while si < len(seed_hits) or ni < len(new_hits):
                 if si < len(seed_hits):
-                    out.append(seed_hits[si]); si += 1
+                    out.append(seed_hits[si])
+                    si += 1
                 if ni < len(new_hits):
-                    out.append(new_hits[ni]); ni += 1
+                    out.append(new_hits[ni])
+                    ni += 1
             return out
         if strategy == "append":
             return list(seed_hits) + new_hits

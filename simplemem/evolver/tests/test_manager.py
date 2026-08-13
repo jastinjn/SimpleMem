@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from simplemem.evolver.embeddings import HashingEmbedder
 from simplemem.evolver.manager import MemoryManager
-from simplemem.evolver.models import MemoryType, MemoryUnit
+from simplemem.evolver.models import MemoryType
 from simplemem.evolver.policy import MemoryPolicy
 from simplemem.evolver.store import MemoryStore
 
@@ -108,7 +108,7 @@ class TestIngestSessionTurns:
         short_turns = [{"prompt_text": "ok", "response_text": ""}]
         # "ok" has len=2 < 3, so the extracted unit content is "ok" which is filtered.
         # fallback content = "ok\nAssistant: " → still too short? Let's test no crash.
-        added = mgr.ingest_session_turns("sess-short", short_turns)
+        mgr.ingest_session_turns("sess-short", short_turns)
         # Whatever is added should not include units with content len < 3.
         for u in store.list_active("test"):
             assert len(u.content.strip()) >= 3
