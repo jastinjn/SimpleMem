@@ -273,7 +273,7 @@ class MultiViewIndex:
         self.bm25_corpus = [c.lower().split() for c in self.contents]
         if self.bm25_corpus:
             try:
-                from rank_bm25 import BM25Okapi
+                from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
                 self.bm25 = BM25Okapi(self.bm25_corpus)
                 logger.info("BM25 index built")
             except ImportError:
@@ -619,8 +619,8 @@ def _fuse(
                     fused[i] = (fused[i][0] + add, fused[i][1])
                 else:
                     fused[i] = (add, view)
-        ordered = sorted(fused.items(), key=lambda kv: -kv[1][0])
-        return [(i, s, src) for i, (s, src) in ordered]
+        _rrf_sorted = sorted(fused.items(), key=lambda kv: -kv[1][0])
+        return [(i, s, src) for i, (s, src) in _rrf_sorted]
 
     if mode == "weighted_sum":
         fused: dict[int, tuple[float, str]] = {}
@@ -636,8 +636,8 @@ def _fuse(
                     fused[i] = (fused[i][0] + norm, fused[i][1])
                 else:
                     fused[i] = (norm, view)
-        ordered = sorted(fused.items(), key=lambda kv: -kv[1][0])
-        return [(i, s, src) for i, (s, src) in ordered]
+        _ws_sorted = sorted(fused.items(), key=lambda kv: -kv[1][0])
+        return [(i, s, src) for i, (s, src) in _ws_sorted]
 
     # Default: first_found
     seen: set[int] = set()

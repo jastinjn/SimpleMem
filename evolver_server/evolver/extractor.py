@@ -90,7 +90,7 @@ class ExtractionResult:
     error: str = ""
 
 
-def _robust_parse_json(raw: str) -> list | None:
+def _robust_parse_json(raw: str) -> list | dict | None:
     """Parse JSON from LLM response with multiple fallback strategies."""
     raw = raw.strip()
 
@@ -320,6 +320,7 @@ class MemoryExtractor:
 
             unit = MemoryUnit(
                 memory_id=str(uuid.uuid4()),
+                user_id="",
                 scope_id=scope_id,
                 memory_type=mtype,
                 content=content,
@@ -395,7 +396,7 @@ class MemoryExtractor:
                 if isinstance(data, dict):
                     for key in ("entries", "memory_entries", "results", "data"):
                         if key in data and isinstance(data[key], list):
-                            data = data[key]
+                            data = data[key]  # type: ignore[assignment]
                             break
                     else:
                         if "lossless_restatement" in data:

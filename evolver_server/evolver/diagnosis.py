@@ -679,6 +679,7 @@ class MemoryDiagnostics:
         attempt_history: list[dict] | None = None,
     ):
         """Use LLM for deep failure analysis and suggestion generation."""
+        assert self.llm_call is not None
         import json as _json
         zeros = [r for r in results if r.f1 == 0]
 

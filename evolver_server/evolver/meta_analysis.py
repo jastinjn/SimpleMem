@@ -298,6 +298,7 @@ class MetaEvolutionAnalyzer:
         current_qa_failures: list[dict],
         current_config: dict,
     ) -> MetaPlan | None:
+        assert self.llm_call is not None
         # Build readable history
         hist_lines = []
         for r in round_history:

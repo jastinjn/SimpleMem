@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .models import MemorySearchHit, MemoryStatus, MemoryType, MemoryUnit
 from .models import utc_now_iso as _utc_now_iso
 from .schema import (
-    EMBEDDING_DIM,
     Memory,
     MemoryAnnotation,
     MemoryEvent,
@@ -333,7 +332,6 @@ class MemoryStore:
     async def search_vector(self, user_id: str, scope_id: str | None, query_embedding: list[float], limit: int = 10) -> list[MemoryUnit]:
         if not query_embedding:
             return []
-        import json as _json
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         async with self._sm() as s:
             cond = (
@@ -420,7 +418,8 @@ class MemoryStore:
         return [{"scope_id": r[0], "total": int(r[1]), "active": active_map.get(r[0], 0)} for r in rows2]
 
     async def compute_health_score(self, user_id: str, scope_id: str | None = None) -> dict:
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
         units = await self.list_active(user_id, scope_id, limit=5000)
         if not units:
             return {"score": 0, "components": {}, "active_count": 0}
@@ -686,7 +685,7 @@ class MemoryStore:
                 .values(expires_at=expires_at, updated_at=now)
             )
             await s.commit()
-        return result.rowcount or 0
+        return result.rowcount or 0  # type: ignore[union-attr]
 
     async def share_to_scope(self, memory_id: str, target_scope_id: str) -> str | None:
         import uuid as _uuid
@@ -740,7 +739,7 @@ class MemoryStore:
         await self.supersede(id_a, new_id, now)
         await self.supersede(id_b, new_id, now)
         async with self._sm() as s:
-            await self._log_event(s, "merge", new_id, a.scope_id, f"from={id_a[:18]}+{id_b[:18]}")
+            await self._log_event(s, "merge", new_id, a.scope_id or "", f"from={id_a[:18]}+{id_b[:18]}")
             await s.commit()
         return new_id
 
@@ -897,9 +896,10 @@ class MemoryStore:
             ))
             await s.commit()
         return {
-            "removed_links": r_links.rowcount, "removed_watches": r_watches.rowcount,
-            "removed_annotations": r_annotations.rowcount,
-            "total_removed": r_links.rowcount + r_watches.rowcount + r_annotations.rowcount,
+            "removed_links": r_links.rowcount,  # type: ignore[union-attr]
+            "removed_watches": r_watches.rowcount,  # type: ignore[union-attr]
+            "removed_annotations": r_annotations.rowcount,  # type: ignore[union-attr]
+            "total_removed": (r_links.rowcount or 0) + (r_watches.rowcount or 0) + (r_annotations.rowcount or 0),  # type: ignore[union-attr]
         }
 
     async def sample_memories(self, user_id: str, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
@@ -940,7 +940,7 @@ class MemoryStore:
                 cond = cond & (ScopeAccess.permission == permission)
             result = await s.execute(delete(ScopeAccess).where(cond))
             await s.commit()
-        return result.rowcount or 0
+        return result.rowcount or 0  # type: ignore[union-attr]
 
     async def check_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
         async with self._sm() as s:
@@ -989,7 +989,7 @@ class MemoryStore:
                 cond = cond & (MemoryLink.link_type == link_type)
             result = await s.execute(delete(MemoryLink).where(cond))
             await s.commit()
-        return result.rowcount or 0
+        return result.rowcount or 0  # type: ignore[union-attr]
 
     async def get_links(self, memory_id: str, direction: str = "both") -> list[dict]:
         results = []
@@ -1033,7 +1033,7 @@ class MemoryStore:
                 delete(MemoryWatch).where((MemoryWatch.memory_id == memory_id) & (MemoryWatch.watcher == watcher))
             )
             await s.commit()
-        return (result.rowcount or 0) > 0
+        return (result.rowcount or 0) > 0  # type: ignore[union-attr]
 
     async def get_watchers(self, memory_id: str) -> list[str]:
         async with self._sm() as s:
@@ -1069,7 +1069,7 @@ class MemoryStore:
         async with self._sm() as s:
             result = await s.execute(delete(MemoryAnnotation).where(MemoryAnnotation.annotation_id == annotation_id))
             await s.commit()
-        return (result.rowcount or 0) > 0
+        return (result.rowcount or 0) > 0  # type: ignore[union-attr]
 
     def close(self) -> None:
         pass  # Engine disposal handled in app lifespan.

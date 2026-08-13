@@ -127,7 +127,7 @@ def rouge_l(pred: str, ref: str) -> float:
 @lru_cache(maxsize=1)
 def _sbert():
     try:
-        from sentence_transformers import SentenceTransformer
+        from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
         return SentenceTransformer("all-MiniLM-L6-v2")
     except Exception:
         return None
@@ -147,7 +147,7 @@ def sbert_similarity(pred: str, ref: str) -> float | None:
 
 def rougel_scorer(pred: str, ref: str) -> float | None:
     try:
-        from rouge_score import rouge_scorer
+        from rouge_score import rouge_scorer  # type: ignore[import-untyped]
         s = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True).score(ref, pred)
         return float(s["rougeL"].fmeasure)
     except Exception:

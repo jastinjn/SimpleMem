@@ -60,7 +60,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 
     def _load_model(self) -> None:
         try:
-            from sentence_transformers import SentenceTransformer
+            from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
             self._model = SentenceTransformer(self.model_name)
             # Cache dimensions from a probe encode
             probe = self._model.encode("probe", convert_to_numpy=True)

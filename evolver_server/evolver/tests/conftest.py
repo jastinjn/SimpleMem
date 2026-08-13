@@ -29,7 +29,6 @@ Three sources of nondeterminism are pinned throughout this suite:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -185,7 +184,7 @@ def _make_unit(**overrides) -> MemoryUnit:
         updated_at=ts,
     )
     defaults.update(overrides)
-    return MemoryUnit(**defaults)
+    return MemoryUnit(**defaults)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

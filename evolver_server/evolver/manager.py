@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 
 from .config import EvolveMemConfig
 from .consolidator import MemoryConsolidator
@@ -75,7 +76,7 @@ class MemoryManager:
         self.consolidator = MemoryConsolidator(store=self.store)
         self._retrieval_cache: dict[str, list[MemoryUnit]] = {}
         self._cache_max_size = 16
-        self._event_callbacks: list[callable] = []
+        self._event_callbacks: list[Callable] = []
 
     @classmethod
     def from_config(cls, cfg: EvolveMemConfig) -> "MemoryManager":
@@ -89,7 +90,7 @@ class MemoryManager:
             policy_state.retrieval_mode = cfg.memory_retrieval_mode
             policy_store.save(policy_state, reason="bootstrap")
         policy = MemoryPolicy.from_state(policy_state)
-        store = MemoryStore(cfg.memory_store_path)
+        store = MemoryStore(cfg.memory_store_path)  # type: ignore[arg-type]
         return cls(
             store=store,
             policy=policy,
@@ -112,7 +113,7 @@ class MemoryManager:
         policy_store = MemoryPolicyStore(cfg.memory_policy_path)
         telemetry_store = MemoryTelemetryStore(cfg.memory_telemetry_path)
         policy = MemoryPolicy.from_state(policy_state)
-        store = MemoryStore(cfg.memory_store_path)
+        store = MemoryStore(cfg.memory_store_path)  # type: ignore[arg-type]
         return cls(
             store=store,
             policy=policy,
@@ -126,7 +127,7 @@ class MemoryManager:
             embedding_model=getattr(cfg, "memory_embedding_model", "all-MiniLM-L6-v2"),
         )
 
-    def register_event_callback(self, callback: callable) -> None:
+    def register_event_callback(self, callback: Callable) -> None:
         """Register a callback for memory events.
 
         Callbacks receive a dict with at least 'event' (str) and 'scope_id' (str).
@@ -252,7 +253,7 @@ class MemoryManager:
                     },
                 )
         stats = await summarize_memory_store(self.store, uid, scope)
-        self._refresh_policy(scope)
+        await self._refresh_policy(scope)
         if self.telemetry_store is not None:
             self.telemetry_store.record(
                 "memory_ingest",
@@ -349,7 +350,7 @@ class MemoryManager:
                 effective_scope, self.retrieval_mode, task_description[:80],
             )
         if self.telemetry_store is not None:
-            rendered = self.render_for_prompt(units)
+            rendered = await self.render_for_prompt(units)
             # Type distribution of retrieved units.
             type_counts: dict[str, int] = {}
             for u in units:
@@ -590,7 +591,7 @@ class MemoryManager:
                     continue
                 if a.content.strip().lower() == b.content.strip().lower():
                     continue
-                pair_key = tuple(sorted([a.memory_id, b.memory_id]))
+                pair_key = (min(a.memory_id, b.memory_id), max(a.memory_id, b.memory_id))
                 if pair_key in seen:
                     continue
                 seen.add(pair_key)
@@ -760,7 +761,7 @@ class MemoryManager:
 
     async def restore_snapshot(self, snapshot: dict) -> int:
         """Restore a scope from a previous snapshot."""
-        count = await self.store.restore_snapshot(snapshot)
+        count = await self.store.restore_snapshot(self.user_id, snapshot)
         if count:
             await self.clear_cache()
         return count
@@ -2357,7 +2358,6 @@ class MemoryManager:
 
     async def cascade_archive(self, memory_id: str) -> dict:
         """Archive a memory and all memories that depend on it (transitively)."""
-        from datetime import datetime, timezone
 
         impact = await self.analyze_memory_impact(memory_id)
         if "error" in impact:
@@ -2572,12 +2572,12 @@ class MemoryManager:
         """
         scope = scope_id or self.scope_id
 
-        report = self.get_memory_summary_report(scope)
+        report = await self.get_memory_summary_report(scope)
         access = await self.analyze_access_frequency(scope)
         density = await self.get_content_density_stats(scope)
         link_stats = await self.get_link_graph_stats(scope)
         forecast = await self.forecast_expiry(scope)
-        quota = self.check_scope_quota(scope)
+        quota = await self.check_scope_quota(scope)
         archive_recs = await self.recommend_archival(scope, limit=5)
         urgency = await self.compute_urgency_scores(scope, limit=5)
 
@@ -2995,7 +2995,7 @@ class MemoryManager:
             })
 
         # Check quota.
-        quota = self.check_scope_quota(scope)
+        quota = await self.check_scope_quota(scope)
         if quota["warning"]:
             actions.append({
                 "action": "archive_low_value",
@@ -3303,7 +3303,7 @@ class MemoryManager:
         gates = []
 
         # Gate 1: Content validation.
-        validation = self.validate_content(content)
+        validation = await self.validate_content(content)
         gates.append({
             "gate": "content_validation",
             "passed": validation["valid"],
@@ -3381,7 +3381,7 @@ class MemoryManager:
         results["consolidation"] = consolidation
 
         # 3. Apply typed retention policy.
-        retention = self.apply_typed_retention(scope)
+        retention = await self.apply_typed_retention(scope)
         results["retention_archived"] = retention["archived"]
 
         # 4. Clean orphaned references.
@@ -3402,7 +3402,7 @@ class MemoryManager:
     async def sample_memories(self, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
         """Return a random sample of active memories for exploration."""
         scope = scope_id or self.scope_id
-        return await self.store.sample_memories(scope, count)
+        return await self.store.sample_memories(self.user_id, scope, count)
 
     async def get_api_status(self, scope_id: str | None = None) -> dict:
         """Get a comprehensive, API-ready status summary.
@@ -4002,6 +4002,7 @@ class MemoryManager:
         """
         scope = scope_id or self.scope_id
         query = MemoryQuery(
+            user_id=self.user_id,
             scope_id=scope,
             query_text=query_text,
             top_k=limit,
@@ -4078,8 +4079,8 @@ class MemoryManager:
         Returns delta information showing what changed since last snapshot.
         """
         scope = scope_id or self.scope_id
-        current_stats = await self.store.get_stats(scope)
-        trends = await self.store.get_stats_trend(scope, limit=2)
+        current_stats = await self.store.get_stats(self.user_id, scope)
+        trends = await self.store.get_stats_trend(self.user_id, scope, limit=2)
 
         if len(trends) < 1:
             return {
@@ -4357,11 +4358,11 @@ class MemoryManager:
             used += cost
         return kept
 
-    def _refresh_policy(self, scope_id: str) -> None:
+    async def _refresh_policy(self, scope_id: str) -> None:
         if self.policy_store is None:
             return
         current_state = self.policy_store.load()
-        proposed = self.policy_optimizer.propose(scope_id, current_state)
+        proposed = await self.policy_optimizer.propose(self.user_id, scope_id, current_state)
         if proposed == current_state:
             return
         self.policy_store.save(proposed, reason="auto_optimize")

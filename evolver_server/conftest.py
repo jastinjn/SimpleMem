@@ -36,8 +36,9 @@ def event_loop_policy():
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _worker_schema():
     """Create the worker schema + run Alembic migrations once per session."""
-    from alembic import command
     from alembic.config import Config as AlembicConfig
+
+    from alembic import command
 
     engine = create_async_engine(_TEST_DB_URL, connect_args=_CONNECT_ARGS, pool_pre_ping=True)
     async with engine.begin() as conn:

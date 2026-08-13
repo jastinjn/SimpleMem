@@ -5,8 +5,6 @@ import os
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
-    Boolean,
-    Computed,
     Float,
     Index,
     Integer,

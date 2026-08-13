@@ -22,8 +22,8 @@ class MemoryPolicyOptimizer:
         self.store = store
         self.telemetry_store = telemetry_store
 
-    def propose(self, scope_id: str, current: MemoryPolicyState) -> MemoryPolicyState:
-        stats = summarize_memory_store(self.store, scope_id)
+    async def propose(self, user_id: str, scope_id: str, current: MemoryPolicyState) -> MemoryPolicyState:
+        stats = await summarize_memory_store(self.store, user_id, scope_id)
         proposed = MemoryPolicyState(**current.__dict__)
         notes = list(current.notes)
 
