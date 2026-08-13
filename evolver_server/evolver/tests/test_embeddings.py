@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from simplemem.evolver.embeddings import (
+from evolver_server.evolver.embeddings import (
     HashingEmbedder,
     cosine_similarity,
     create_embedder,

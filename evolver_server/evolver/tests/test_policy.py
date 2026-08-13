@@ -8,8 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from simplemem.evolver.policy import MemoryPolicy
-from simplemem.evolver.policy_store import MemoryPolicyState
+from evolver_server.evolver.policy import MemoryPolicy
+from evolver_server.evolver.policy_store import MemoryPolicyState
 
 
 class TestMemoryPolicyDefaults:

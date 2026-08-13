@@ -15,8 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from simplemem.evolver.consolidator import MemoryConsolidator
-from simplemem.evolver.models import MemoryType, MemoryUnit
+from evolver_server.evolver.consolidator import MemoryConsolidator
+from evolver_server.evolver.models import MemoryType, MemoryUnit
 
 from .conftest import _make_store, _make_unit, create_test_units
 

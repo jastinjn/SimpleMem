@@ -14,11 +14,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from simplemem.evolver.embeddings import HashingEmbedder
-from simplemem.evolver.manager import MemoryManager
-from simplemem.evolver.models import MemoryType
-from simplemem.evolver.policy import MemoryPolicy
-from simplemem.evolver.store import MemoryStore
+from evolver_server.evolver.embeddings import HashingEmbedder
+from evolver_server.evolver.manager import MemoryManager
+from evolver_server.evolver.models import MemoryType
+from evolver_server.evolver.policy import MemoryPolicy
+from evolver_server.evolver.store import MemoryStore
 
 from .conftest import _make_store, _make_unit
 
@@ -47,7 +47,7 @@ def _manager(
 
 
 def _patch_time(monkeypatch):
-    monkeypatch.setattr("simplemem.evolver.manager.utc_now_iso", lambda: FIXED_TS)
+    monkeypatch.setattr("evolver_server.evolver.manager.utc_now_iso", lambda: FIXED_TS)
 
 
 SAMPLE_TURNS = [
