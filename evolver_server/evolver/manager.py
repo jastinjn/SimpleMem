@@ -30,6 +30,7 @@ class MemoryManager:
         self,
         store: MemoryStore,
         policy: MemoryPolicy | None = None,
+        user_id: str = "",
         scope_id: str = "default",
         auto_consolidate: bool = True,
         retrieval_mode: str = "keyword",
@@ -42,6 +43,7 @@ class MemoryManager:
     ):
         self.store = store
         self.policy = policy or MemoryPolicy()
+        self.user_id = user_id
         self.scope_id = scope_id
         self.auto_consolidate = auto_consolidate
         self.retrieval_mode = retrieval_mode
@@ -147,9 +149,11 @@ class MemoryManager:
         self,
         session_id: str,
         turns: list[dict],
+        user_id: str | None = None,
         scope_id: str | None = None,
     ) -> int:
         """Create simple phase-1 memory units from a completed session."""
+        uid = user_id or self.user_id
         scope = scope_id or self.scope_id
         units: list[MemoryUnit] = []
 
@@ -163,6 +167,7 @@ class MemoryManager:
                 continue
 
             extracted = _extract_memory_units_for_turn(
+                user_id=uid,
                 scope_id=scope,
                 session_id=session_id,
                 turn_index=idx,
@@ -179,10 +184,15 @@ class MemoryManager:
             units.extend(extracted)
             context.add_turn(prompt_text, response_text, idx)
 
+        # Stamp user_id on all extracted units.
+        for u in units:
+            u.user_id = uid
+
         if turns:
             units.append(
                 MemoryUnit(
                     memory_id=str(uuid.uuid4()),
+                    user_id=uid,
                     scope_id=scope,
                     memory_type=MemoryType.WORKING_SUMMARY,
                     content=_build_working_summary(turns),
@@ -201,7 +211,7 @@ class MemoryManager:
 
         # Pre-ingestion dedup: skip units whose content already exists in the store.
         pre_dedup_count = len(units)
-        units = _dedup_against_store(units, self.store, scope)
+        units = _dedup_against_store(units, self.store, uid, scope)
         dedup_skipped = pre_dedup_count - len(units)
         if dedup_skipped or (pre_validate_count - pre_dedup_count):
             logger.info(
@@ -210,7 +220,7 @@ class MemoryManager:
             )
 
         # Detect potential conflicts with existing memories.
-        conflicts = _detect_conflicts(units, self.store, scope)
+        conflicts = _detect_conflicts(units, self.store, uid, scope)
         if conflicts:
             logger.info("[Memory] detected %d conflicts with existing memories", len(conflicts))
             if self.telemetry_store is not None:
@@ -229,7 +239,7 @@ class MemoryManager:
         added = self.store.add_memories(units)
         self.clear_cache()
         if self.auto_consolidate:
-            consolidation_result = self.consolidator.consolidate(scope)
+            consolidation_result = self.consolidator.consolidate(uid, scope)
             if self.telemetry_store is not None and consolidation_result:
                 self.telemetry_store.record(
                     "memory_consolidation",
@@ -241,7 +251,7 @@ class MemoryManager:
                         "reinforced": consolidation_result.get("reinforced", 0),
                     },
                 )
-        stats = summarize_memory_store(self.store, scope)
+        stats = summarize_memory_store(self.store, uid, scope)
         self._refresh_policy(scope)
         if self.telemetry_store is not None:
             self.telemetry_store.record(
@@ -265,7 +275,7 @@ class MemoryManager:
         )
         # Auto-save stats snapshot after ingestion for trend tracking.
         try:
-            self.store.save_stats_snapshot(scope)
+            self.store.save_stats_snapshot(uid, scope)
         except Exception:
             pass  # Best-effort stats tracking.
         self._notify("ingest", scope_id=scope, session_id=session_id, added=added)
@@ -289,6 +299,7 @@ class MemoryManager:
         self._cache_misses += 1
 
         query = MemoryQuery(
+            user_id=self.user_id,
             scope_id=effective_scope,
             query_text=task_description,
             top_k=self.policy.max_injected_units,
@@ -410,8 +421,8 @@ class MemoryManager:
                         lines.append(f"- {text}")
         return "\n".join(lines).strip()
 
-    def get_scope_stats(self, scope_id: str | None = None) -> dict:
-        return summarize_memory_store(self.store, scope_id or self.scope_id)
+    def get_scope_stats(self, user_id: str | None = None, scope_id: str | None = None) -> dict:
+        return summarize_memory_store(self.store, user_id or self.user_id, scope_id)
 
     def get_policy_state(self) -> dict:
         if self.policy_store is None:
@@ -421,7 +432,7 @@ class MemoryManager:
     def get_access_patterns(self, scope_id: str | None = None, limit: int = 5) -> dict:
         """Return access pattern insights for the given scope."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         if not units:
             return {"total": 0, "most_accessed": [], "never_accessed": 0}
         sorted_by_access = sorted(units, key=lambda u: u.access_count, reverse=True)
@@ -469,7 +480,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         age_buckets = {"<1h": 0, "<24h": 0, "<7d": 0, "older": 0}
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         now = datetime.now(timezone.utc)
         for u in units:
             try:
@@ -558,7 +569,7 @@ class MemoryManager:
         topic/entity overlap but have different content.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         if len(units) < 2:
             return []
 
@@ -605,6 +616,7 @@ class MemoryManager:
         """
         effective_scope = scope_id or self.scope_id
         query = MemoryQuery(
+            user_id=self.user_id,
             scope_id=effective_scope,
             query_text=task_description,
             top_k=self.policy.max_injected_units,
@@ -856,7 +868,7 @@ class MemoryManager:
         out to improve retrieval differentiation.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if len(units) < 5:
             return {"adjusted": 0}
 
@@ -970,7 +982,7 @@ class MemoryManager:
         Returns a human-readable overview useful for operator inspection.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         if not units:
             return "No active memories."
 
@@ -1009,7 +1021,7 @@ class MemoryManager:
         Useful for operator debugging and inspection.
         """
         scope = scope_id or self.scope_id
-        hits = self.store.search_keyword(scope, query_text, limit=limit)
+        hits = self.store.search_keyword(self.user_id, scope,query_text, limit=limit)
         return [
             {
                 "memory_id": h.unit.memory_id,
@@ -1067,7 +1079,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
 
@@ -1129,7 +1141,7 @@ class MemoryManager:
             for k, v in type_policies.items():
                 defaults[k] = {**defaults.get(k, {}), **v}
 
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
 
@@ -1190,7 +1202,7 @@ class MemoryManager:
         if base_days:
             defaults.update(base_days)
 
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
         for u in units:
@@ -1227,7 +1239,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         to_archive: list[str] = []
 
@@ -1321,7 +1333,7 @@ class MemoryManager:
     def get_lowest_quality_memories(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
         """Get the lowest-quality active memories in a scope for review/cleanup."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         scored = []
         for u in units:
             result = self.score_memory_quality(u.memory_id)
@@ -1404,7 +1416,7 @@ class MemoryManager:
 
         Memories are copied to the new scope and archived in the old scope.
         """
-        units = self.store.list_active(from_scope, limit=10000)
+        units = self.store.list_active(self.user_id, from_scope, limit=10000)
         migrated = 0
         for u in units:
             new_id = self.store.share_to_scope(u.memory_id, to_scope)
@@ -1427,7 +1439,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         buckets = {"< 1 day": 0, "1-7 days": 0, "1-4 weeks": 0, "1-3 months": 0, "3+ months": 0}
 
@@ -1459,8 +1471,8 @@ class MemoryManager:
         threshold: float = 0.80,
     ) -> list[dict]:
         """Find near-duplicate memories across two scopes."""
-        units_a = self.store.list_active(scope_a, limit=500)
-        units_b = self.store.list_active(scope_b, limit=500)
+        units_a = self.store.list_active(self.user_id, scope_a, limit=500)
+        units_b = self.store.list_active(self.user_id, scope_b, limit=500)
         if not units_a or not units_b:
             return []
 
@@ -1498,7 +1510,7 @@ class MemoryManager:
         Checks for content patterns that suggest a different type than assigned.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1543,7 +1555,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -1649,7 +1661,7 @@ class MemoryManager:
         Returns a list of cycles, each cycle being a list of memory IDs.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
 
         # Build adjacency list for depends_on links.
         adj: dict[str, list[str]] = {}
@@ -1745,7 +1757,7 @@ class MemoryManager:
         Returns dicts with memory info and highlighted content snippets.
         """
         scope = scope_id or self.scope_id
-        hits = self.store.search_keyword(scope, query, limit=limit)
+        hits = self.store.search_keyword(self.user_id, scope,query, limit=limit)
         results = []
         for hit in hits:
             # Build a snippet with matched terms marked.
@@ -1772,7 +1784,7 @@ class MemoryManager:
         Returns topic -> list of memory summaries, sorted by group size descending.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         topic_groups: dict[str, list[dict]] = {}
 
         for u in units:
@@ -1816,7 +1828,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         stale: list[dict] = []
 
@@ -1911,7 +1923,7 @@ class MemoryManager:
         tags for memories that have no tags.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1957,7 +1969,7 @@ class MemoryManager:
         suitable for graph visualization tools.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
 
         nodes = []
         edges = []
@@ -2049,7 +2061,7 @@ class MemoryManager:
         Returns matching memories with the matched portion highlighted.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         results = []
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
@@ -2078,12 +2090,12 @@ class MemoryManager:
         Unlike migrate_scope, this preserves the source scope intact.
         Memories are copied (shared) to the target scope.
         """
-        source_units = self.store.list_active(source_scope, limit=5000)
+        source_units = self.store.list_active(self.user_id, source_scope, limit=5000)
         if not source_units:
             return {"copied": 0, "skipped": 0, "source_scope": source_scope, "target_scope": target_scope}
 
         # Check existing target content to avoid duplicates.
-        target_units = self.store.list_active(target_scope, limit=5000)
+        target_units = self.store.list_active(self.user_id, target_scope, limit=5000)
         target_contents = {u.content.strip().lower() for u in target_units}
 
         copied = 0
@@ -2192,7 +2204,7 @@ class MemoryManager:
         """
         import uuid
 
-        source_units = self.store.list_active(source_scope, limit=5000)
+        source_units = self.store.list_active(self.user_id, source_scope, limit=5000)
         if not source_units:
             return {"cloned": 0, "source_scope": source_scope, "target_scope": target_scope}
 
@@ -2200,6 +2212,7 @@ class MemoryManager:
         for u in source_units:
             new_unit = MemoryUnit(
                 memory_id=str(uuid.uuid4()),
+                user_id=u.user_id,
                 scope_id=target_scope,
                 memory_type=u.memory_type,
                 content=u.content,
@@ -2226,7 +2239,7 @@ class MemoryManager:
         Based on access_count relative to pool average.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"hot": [], "warm": [], "cold": [], "total": 0, "avg_access": 0}
 
@@ -2272,7 +2285,7 @@ class MemoryManager:
         from enrichment.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -2303,7 +2316,7 @@ class MemoryManager:
     def get_content_density_stats(self, scope_id: str | None = None) -> dict:
         """Analyze content density: token counts, value per token, and size distribution."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"total": 0, "avg_tokens": 0, "avg_value_per_token": 0, "size_buckets": {}}
 
@@ -2347,7 +2360,7 @@ class MemoryManager:
         Returns quota status including current count, limit, and utilization.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=max_memories + 1)
+        units = self.store.list_active(self.user_id, scope, limit=max_memories + 1)
         count = len(units)
         utilization = count / max(max_memories, 1)
 
@@ -2394,7 +2407,7 @@ class MemoryManager:
     def get_link_graph_stats(self, scope_id: str | None = None) -> dict:
         """Compute statistics about the memory link graph."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
 
         total_links = 0
         link_type_counts: dict[str, int] = {}
@@ -2438,7 +2451,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
 
         windows = {
@@ -2480,7 +2493,7 @@ class MemoryManager:
         Returns a matrix showing how much each pair of types shares topics.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
 
         type_topics: dict[str, set[str]] = {}
         for u in units:
@@ -2517,7 +2530,7 @@ class MemoryManager:
         into a single archival recommendation score.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         recommendations: list[dict] = []
 
         from datetime import datetime, timezone
@@ -2633,7 +2646,7 @@ class MemoryManager:
         Uses topic and entity overlap to identify potential relationships.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=500)
+        units = self.store.list_active(self.user_id, scope, limit=500)
         suggestions: list[dict] = []
 
         # Build existing link set.
@@ -2679,8 +2692,8 @@ class MemoryManager:
         Goes beyond compare_scopes to include type distributions, topic overlap,
         and health differences.
         """
-        units_a = self.store.list_active(scope_a, limit=5000)
-        units_b = self.store.list_active(scope_b, limit=5000)
+        units_a = self.store.list_active(self.user_id, scope_a, limit=5000)
+        units_b = self.store.list_active(self.user_id, scope_b, limit=5000)
 
         # Type distributions.
         types_a: dict[str, int] = {}
@@ -2785,7 +2798,7 @@ class MemoryManager:
         Creates keyword-based summaries from content (first sentence + topics).
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         generated: list[dict] = []
 
         for u in units:
@@ -2832,7 +2845,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
 
@@ -2889,7 +2902,7 @@ class MemoryManager:
     def analyze_type_balance(self, scope_id: str | None = None) -> dict:
         """Analyze memory type distribution and suggest rebalancing actions."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"total": 0, "distribution": {}, "suggestions": []}
 
@@ -3058,7 +3071,7 @@ class MemoryManager:
             })
 
         # Check for memories without summaries.
-        units = self.store.list_active(scope, limit=100)
+        units = self.store.list_active(self.user_id, scope, limit=100)
         unsummarized = sum(1 for u in units if not u.summary)
         if unsummarized > len(units) * 0.5 and len(units) > 5:
             actions.append({
@@ -3081,7 +3094,7 @@ class MemoryManager:
         Returns structured records with content, metadata, and quality signals.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         records = []
 
         for u in units:
@@ -3137,7 +3150,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -3192,7 +3205,7 @@ class MemoryManager:
         Supports filtering by type, importance range, and sorting.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
 
         # Apply filters.
         filtered = units
@@ -3260,7 +3273,7 @@ class MemoryManager:
     def batch_normalize_content(self, scope_id: str | None = None) -> dict:
         """Normalize content for all memories in a scope."""
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         normalized = 0
 
         for u in units:
@@ -3366,7 +3379,7 @@ class MemoryManager:
         Returns bucket counts for [0.0-0.1), [0.1-0.2), ..., [0.9-1.0].
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         histogram: dict[str, int] = {}
         bucket_size = 1.0 / buckets
         for i in range(buckets):
@@ -3429,7 +3442,7 @@ class MemoryManager:
         policy state, and feature usage indicators.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         health = self.store.compute_health_score(scope)
         db_info = self.store.get_db_size()
         integrity = self.store.validate_integrity()
@@ -3476,7 +3489,7 @@ class MemoryManager:
         scope = scope_id or self.scope_id
         hints: list[str] = []
 
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return ["Store is empty — no optimizations needed."]
 
@@ -3521,7 +3534,7 @@ class MemoryManager:
         access patterns, link statistics, and TTL status.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         health = self.store.compute_health_score(scope)
 
         type_counts: dict[str, int] = {}
@@ -3566,7 +3579,7 @@ class MemoryManager:
         Isolated (unlinked) memories are not included.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         unit_ids = {u.memory_id for u in units}
 
         # Build adjacency from links.
@@ -3639,7 +3652,7 @@ class MemoryManager:
         if emb is None:
             return {"error": "No embedder available", "re_embedded": 0}
 
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         if not units:
             return {"scope_id": scope, "re_embedded": 0, "total": 0}
 
@@ -3695,7 +3708,7 @@ class MemoryManager:
         Returns stats on how many were compressed and total token savings.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         compressed = 0
         total_saved = 0
 
@@ -3728,7 +3741,7 @@ class MemoryManager:
             "procedural_observation": ["procedure"],
         }
         tag_map = type_tag_map or defaults
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         tagged = 0
 
         for u in units:
@@ -3752,7 +3765,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        active = self.store.list_active(scope, limit=5000)
+        active = self.store.list_active(self.user_id, scope, limit=5000)
         all_rows = self.store.conn.execute(
             "SELECT status, importance, access_count, created_at, updated_at FROM memories WHERE scope_id = ?",
             (scope,),
@@ -3808,7 +3821,7 @@ class MemoryManager:
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(days=window_days)).isoformat()
 
-        total_active = len(self.store.list_active(scope, limit=5000))
+        total_active = len(self.store.list_active(self.user_id, scope, limit=5000))
         recent_rows = self.store.conn.execute(
             "SELECT COUNT(*) as cnt FROM memories WHERE scope_id = ? AND created_at >= ?",
             (scope, cutoff),
@@ -3989,7 +4002,7 @@ class MemoryManager:
             })
 
         # 4. Compression opportunities.
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         compressible = sum(1 for u in units if len(u.content) > 200)
         if compressible > 0:
             actions.append({
@@ -4150,13 +4163,13 @@ class MemoryManager:
             "delta": delta,
         }
 
-    def archive_scope(self, scope_id: str) -> dict:
+    def archive_scope(self, user_id: str, scope_id: str | None = None) -> dict:
         """Archive all active memories in a scope.
 
         Useful for retiring old scopes or preparing for scope cleanup.
         Does not touch pinned memories (importance >= 0.99).
         """
-        units = self.store.list_active(scope_id, limit=5000)
+        units = self.store.list_active(user_id, scope_id, limit=5000)
         to_archive = [u.memory_id for u in units if u.importance < 0.99]
         archived = self.store.bulk_archive(to_archive) if to_archive else 0
         pinned_count = len(units) - len(to_archive)
@@ -4181,7 +4194,7 @@ class MemoryManager:
         from datetime import datetime, timezone
 
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         pinned = 0
         now = datetime.now(timezone.utc).isoformat()
 
@@ -4201,7 +4214,7 @@ class MemoryManager:
         Returns a YAML string. Does not require external YAML library.
         """
         scope = scope_id or self.scope_id
-        units = self.store.list_active(scope, limit=5000)
+        units = self.store.list_active(self.user_id, scope, limit=5000)
         lines = ["# Memory Export", f"# Scope: {scope}", f"# Count: {len(units)}", "memories:"]
 
         for u in units:
@@ -4627,6 +4640,7 @@ class _MultiTurnContext:
 
 
 def _extract_memory_units_for_turn(
+    user_id: str,
     scope_id: str,
     session_id: str,
     turn_index: int,
@@ -4660,6 +4674,7 @@ def _extract_memory_units_for_turn(
         extracted.append(
             MemoryUnit(
                 memory_id=str(uuid.uuid4()),
+                user_id=user_id,
                 scope_id=scope_id,
                 memory_type=fact["memory_type"],
                 content=fact["content"][:2000],
@@ -4684,6 +4699,7 @@ def _extract_memory_units_for_turn(
     return [
         MemoryUnit(
             memory_id=str(uuid.uuid4()),
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=fallback_type,
             content=combined[:4000],
@@ -4948,7 +4964,8 @@ def _enforce_type_diversity(
 def _detect_conflicts(
     new_units: list[MemoryUnit],
     store: MemoryStore,
-    scope_id: str,
+    user_id: str,
+    scope_id: str | None,
     similarity_threshold: float = 0.65,
 ) -> list[dict]:
     """Detect potential conflicts between new and existing memories.
@@ -4957,7 +4974,7 @@ def _detect_conflicts(
     with existing memories but have different content, which may indicate
     contradictory information.
     """
-    existing = store.list_active(scope_id, limit=500)
+    existing = store.list_active(user_id, scope_id, limit=500)
     if not existing:
         return []
 
@@ -4996,10 +5013,11 @@ def _detect_conflicts(
 def _dedup_against_store(
     units: list[MemoryUnit],
     store: MemoryStore,
-    scope_id: str,
+    user_id: str,
+    scope_id: str | None,
 ) -> list[MemoryUnit]:
     """Remove units whose content already exists in the active store."""
-    existing = store.list_active(scope_id, limit=500)
+    existing = store.list_active(user_id, scope_id, limit=500)
     if not existing:
         return units
     existing_content = {

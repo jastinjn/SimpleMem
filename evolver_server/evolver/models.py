@@ -27,9 +27,10 @@ class MemoryStatus(str, Enum):
 @dataclass
 class MemoryUnit:
     memory_id: str
-    scope_id: str
+    user_id: str
     memory_type: MemoryType
     content: str
+    scope_id: str | None = None
     summary: str = ""
     source_session_id: str = ""
     source_turn_start: int = 0
@@ -53,8 +54,9 @@ class MemoryUnit:
 
 @dataclass
 class MemoryQuery:
-    scope_id: str
+    user_id: str
     query_text: str
+    scope_id: str | None = None
     top_k: int = 6
     max_tokens: int = 800
     include_types: list[MemoryType] = field(default_factory=list)

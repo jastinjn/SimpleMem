@@ -19,7 +19,7 @@ from evolver_server.evolver.models import MemoryQuery, MemoryType
 from evolver_server.evolver.policy import MemoryPolicy
 from evolver_server.evolver.retriever import MemoryRetriever
 
-from .conftest import _make_store, _make_unit, create_test_units
+from .conftest import UID, _make_store, _make_unit, create_test_units
 
 
 def _policy(recency_weight: float = 0.0, **kwargs) -> MemoryPolicy:
@@ -27,7 +27,7 @@ def _policy(recency_weight: float = 0.0, **kwargs) -> MemoryPolicy:
 
 
 def _query(query_text: str, scope_id: str = "test", top_k: int = 6, **kwargs) -> MemoryQuery:
-    return MemoryQuery(scope_id=scope_id, query_text=query_text, top_k=top_k, **kwargs)
+    return MemoryQuery(user_id=UID, scope_id=scope_id, query_text=query_text, top_k=top_k, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ class TestAutoMode:
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
         # "_auto_select_mode" picks keyword for fewer than 4 terms.
         from evolver_server.evolver.models import MemoryQuery
-        q = MemoryQuery(scope_id="test", query_text="db key")
+        q = MemoryQuery(user_id=UID, scope_id="test", query_text="db key")
         mode = r._auto_select_mode(q)
         assert mode == "keyword"
 
@@ -233,7 +233,7 @@ class TestAutoMode:
         embedder = HashingEmbedder(dimensions=64)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
         from evolver_server.evolver.models import MemoryQuery
-        q = MemoryQuery(scope_id="test", query_text="the project uses PostgreSQL database backend")
+        q = MemoryQuery(user_id=UID, scope_id="test", query_text="the project uses PostgreSQL database backend")
         mode = r._auto_select_mode(q)
         assert mode == "hybrid"
 
@@ -241,7 +241,7 @@ class TestAutoMode:
         store = _make_store(tmp_path)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=None)
         from evolver_server.evolver.models import MemoryQuery
-        q = MemoryQuery(scope_id="test", query_text="the project uses PostgreSQL database backend")
+        q = MemoryQuery(user_id=UID, scope_id="test", query_text="the project uses PostgreSQL database backend")
         mode = r._auto_select_mode(q)
         assert mode == "keyword"
 

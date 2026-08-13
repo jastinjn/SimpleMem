@@ -20,7 +20,7 @@ from evolver_server.evolver.models import MemoryType
 from evolver_server.evolver.policy import MemoryPolicy
 from evolver_server.evolver.store import MemoryStore
 
-from .conftest import _make_store, _make_unit
+from .conftest import UID, _make_store, _make_unit
 
 FIXED_TS = "2025-01-15T14:00:00+00:00"
 
@@ -31,12 +31,14 @@ def _manager(
     auto_consolidate: bool = False,
     retrieval_mode: str = "keyword",
     embedder=None,
+    user_id: str = UID,
     scope_id: str = "test",
 ) -> MemoryManager:
     policy = MemoryPolicy(recency_weight=0.0)
     return MemoryManager(
         store=store,
         policy=policy,
+        user_id=user_id,
         scope_id=scope_id,
         auto_consolidate=auto_consolidate,
         retrieval_mode=retrieval_mode,
@@ -79,7 +81,7 @@ class TestIngestSessionTurns:
         store = _make_store(tmp_path)
         mgr = _manager(store)
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        active = store.list_active("test")
+        active = store.list_active(UID, "test")
         ws_units = [u for u in active if u.memory_type == MemoryType.WORKING_SUMMARY]
         assert len(ws_units) == 1
         assert ws_units[0].importance == pytest.approx(0.9)
@@ -89,7 +91,7 @@ class TestIngestSessionTurns:
         store = _make_store(tmp_path)
         mgr = _manager(store)
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        ws_units = [u for u in store.list_active("test")
+        ws_units = [u for u in store.list_active(UID, "test")
                     if u.memory_type == MemoryType.WORKING_SUMMARY]
         assert ws_units[0].memory_id.startswith("00000000-")
 
@@ -99,7 +101,7 @@ class TestIngestSessionTurns:
         mgr = _manager(store)
         added = mgr.ingest_session_turns("sess-001", [])
         assert added == 0
-        assert store.list_active("test") == []
+        assert store.list_active(UID, "test") == []
 
     def test_short_content_filtered(self, tmp_path, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
@@ -110,7 +112,7 @@ class TestIngestSessionTurns:
         # fallback content = "ok\nAssistant: " → still too short? Let's test no crash.
         mgr.ingest_session_turns("sess-short", short_turns)
         # Whatever is added should not include units with content len < 3.
-        for u in store.list_active("test"):
+        for u in store.list_active(UID, "test"):
             assert len(u.content.strip()) >= 3
 
     def test_dedup_skips_existing_content(self, tmp_path, monkeypatch, fake_uuid):
@@ -145,7 +147,7 @@ class TestIngestSessionTurns:
         # Ingest more turns without consolidation.
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         # Both pre-existing summaries should still be active.
-        active_ws = [u for u in store.list_active("test")
+        active_ws = [u for u in store.list_active(UID, "test")
                      if u.memory_type == MemoryType.WORKING_SUMMARY]
         ws_ids = {u.memory_id for u in active_ws}
         assert "ws-pre-001" in ws_ids
@@ -164,7 +166,7 @@ class TestIngestSessionTurns:
         store.add_memories([ws1])
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         # After consolidation, only newest working summary should be active.
-        active_ws = [u for u in store.list_active("test")
+        active_ws = [u for u in store.list_active(UID, "test")
                      if u.memory_type == MemoryType.WORKING_SUMMARY]
         assert len(active_ws) == 1
 
@@ -174,7 +176,7 @@ class TestIngestSessionTurns:
         embedder = HashingEmbedder(dimensions=64)
         mgr = _manager(store, embedder=embedder)
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        units = store.list_active("test")
+        units = store.list_active(UID, "test")
         non_ws = [u for u in units if u.memory_type != MemoryType.WORKING_SUMMARY]
         assert all(len(u.embedding) == 64 for u in non_ws)
 
@@ -183,7 +185,7 @@ class TestIngestSessionTurns:
         store = _make_store(tmp_path)
         mgr = _manager(store, embedder=None)
         mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        units = store.list_active("test")
+        units = store.list_active(UID, "test")
         non_ws = [u for u in units if u.memory_type != MemoryType.WORKING_SUMMARY]
         assert all(u.embedding == [] for u in non_ws)
 
@@ -191,9 +193,9 @@ class TestIngestSessionTurns:
         _patch_time(monkeypatch)
         store = _make_store(tmp_path)
         mgr = _manager(store, scope_id="default")
-        mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, scope_id="custom_scope")
-        assert store.get_stats("custom_scope")["active"] > 0
-        assert store.get_stats("default")["active"] == 0
+        mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, user_id=UID, scope_id="custom_scope")
+        assert store.get_stats(UID, "custom_scope")["active"] > 0
+        assert store.get_stats(UID, "default")["active"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +285,7 @@ class TestRetrieveForPrompt:
         # Tight token budget so not all matching units fit.
         policy = MemoryPolicy(recency_weight=0.0, max_injected_units=10, max_injected_tokens=5)
         mgr = MemoryManager(
-            store=store, policy=policy, scope_id="test",
+            store=store, policy=policy, user_id=UID, scope_id="test",
             auto_consolidate=False, policy_store=None, telemetry_store=None,
         )
         self._ingest(mgr, fake_uuid)
@@ -296,7 +298,7 @@ class TestRetrieveForPrompt:
         store = _make_store(tmp_path)
         mgr = _manager(store, scope_id="default")
         # Ingest into "other_scope".
-        mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, scope_id="other_scope")
+        mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, user_id=UID, scope_id="other_scope")
         # Retrieve from "other_scope" explicitly.
         units = mgr.retrieve_for_prompt("PostgreSQL", scope_id="other_scope")
         assert len(units) > 0

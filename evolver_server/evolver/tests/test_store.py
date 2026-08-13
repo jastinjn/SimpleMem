@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from evolver_server.evolver.models import MemoryStatus, MemoryType
 from evolver_server.evolver.store import MemoryStore
 
-from .conftest import _make_store, _make_unit, create_test_units
+from .conftest import UID, _make_store, _make_unit, create_test_units
 
 # ---------------------------------------------------------------------------
 # add_memories
@@ -56,7 +56,7 @@ class TestListActive:
         units = create_test_units()
         store.add_memories(units)
         store.supersede("unit-001", "unit-002", updated_at="2025-01-15T15:00:00+00:00")
-        active = store.list_active("test")
+        active = store.list_active(UID, "test")
         ids = {u.memory_id for u in active}
         assert "unit-001" not in ids
         assert "unit-002" in ids
@@ -66,13 +66,13 @@ class TestListActive:
         u_a = _make_unit(memory_id="a-001", scope_id="scope_a", updated_at="2025-01-01T00:00:01+00:00")
         u_b = _make_unit(memory_id="b-001", scope_id="scope_b", updated_at="2025-01-01T00:00:02+00:00")
         store.add_memories([u_a, u_b])
-        assert all(u.scope_id == "scope_a" for u in store.list_active("scope_a"))
-        assert all(u.scope_id == "scope_b" for u in store.list_active("scope_b"))
+        assert all(u.scope_id == "scope_a" for u in store.list_active(UID, "scope_a"))
+        assert all(u.scope_id == "scope_b" for u in store.list_active(UID, "scope_b"))
 
     def test_ordered_by_updated_at_desc(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        active = store.list_active("test")
+        active = store.list_active(UID, "test")
         timestamps = [u.updated_at for u in active]
         assert timestamps == sorted(timestamps, reverse=True)
 
@@ -89,14 +89,14 @@ class TestListActive:
             updated_at="2025-01-01T00:00:01+00:00",
         )
         store.add_memories([expired, alive])
-        ids = {u.memory_id for u in store.list_active("test")}
+        ids = {u.memory_id for u in store.list_active(UID, "test")}
         assert "exp-001" not in ids
         assert "alive-001" in ids
 
     def test_limit_respected(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        assert len(store.list_active("test", limit=2)) == 2
+        assert len(store.list_active(UID, "test", limit=2)) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +107,14 @@ class TestSearchKeyword:
     def test_basic_match(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        hits = store.search_keyword("test", "PostgreSQL", limit=6)
+        hits = store.search_keyword(UID, "test", "PostgreSQL", limit=6)
         ids = {h.unit.memory_id for h in hits}
         assert "unit-001" in ids
 
     def test_no_match_returns_empty(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        hits = store.search_keyword("test", "xyzzy_no_match", limit=6)
+        hits = store.search_keyword(UID, "test", "xyzzy_no_match", limit=6)
         assert hits == []
 
     def test_scope_isolation(self, tmp_path):
@@ -128,13 +128,13 @@ class TestSearchKeyword:
             content="PostgreSQL database", updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u_a, u_b])
-        hits = store.search_keyword("scope_a", "PostgreSQL")
+        hits = store.search_keyword(UID, "scope_a", "PostgreSQL")
         assert all(h.unit.scope_id == "scope_a" for h in hits)
 
     def test_limit(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        hits = store.search_keyword("test", "the", limit=2)
+        hits = store.search_keyword(UID, "test", "the", limit=2)
         assert len(hits) <= 2
 
     def test_higher_importance_ranks_higher(self, tmp_path):
@@ -150,15 +150,15 @@ class TestSearchKeyword:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([low, high])
-        hits = store.search_keyword("rank", "project database", limit=6)
+        hits = store.search_keyword(UID, "rank", "project database", limit=6)
         assert hits[0].unit.memory_id == "high-001"
 
     def test_manual_fallback_same_ranking(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        hits_fts = store.search_keyword("test", "authentication", limit=6)
+        hits_fts = store.search_keyword(UID, "test", "authentication", limit=6)
         store._fts_available = False
-        hits_manual = store.search_keyword("test", "authentication", limit=6)
+        hits_manual = store.search_keyword(UID, "test", "authentication", limit=6)
         assert [h.unit.memory_id for h in hits_fts] == [h.unit.memory_id for h in hits_manual]
 
 
@@ -181,7 +181,7 @@ class TestSupersede:
         u = _make_unit(memory_id="s-001")
         store.add_memories([u])
         store.supersede("s-001", "s-999", updated_at="2025-02-01T00:00:00+00:00")
-        ids = {u.memory_id for u in store.list_active("test")}
+        ids = {u.memory_id for u in store.list_active(UID, "test")}
         assert "s-001" not in ids
 
 
@@ -235,14 +235,14 @@ class TestGetStats:
     def test_counts(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        stats = store.get_stats("test")
+        stats = store.get_stats(UID, "test")
         assert stats["total"] == 6
         assert stats["active"] == 6
 
     def test_active_by_type(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        stats = store.get_stats("test")
+        stats = store.get_stats(UID, "test")
         by_type = stats["active_by_type"]
         assert by_type["semantic"] == 2
         assert by_type["episodic"] == 1
@@ -254,7 +254,7 @@ class TestGetStats:
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
         store.supersede("unit-001", "unit-002", updated_at="2025-02-01T00:00:00+00:00")
-        stats = store.get_stats("test")
+        stats = store.get_stats(UID, "test")
         assert stats["active"] == 5
         assert stats["total"] == 6
 

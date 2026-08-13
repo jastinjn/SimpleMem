@@ -2,7 +2,7 @@
 """Shared fixtures for the Evolver API test suite.
 
 Every test gets a fresh isolated SQLite DB pre-seeded with the standard 6-unit
-corpus injected directly into scope ``"alice"``.
+corpus injected directly into scope ``"alice"`` for user ``"user-alice"``.
 
 Corpus summary:
   unit-001  SEMANTIC          "The project uses PostgreSQL as the primary database"
@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from evolver_server.evolver.tests.conftest import create_test_units  # noqa: E402
 
+USER_ID = "user-alice"
 SCOPE = "alice"
 OTHER_SCOPE = "bob"
 CORPUS_SIZE = 6  # len(create_test_units())
@@ -40,7 +41,7 @@ def client(tmp_path, monkeypatch):
     """TestClient backed by a fresh DB pre-seeded with the standard corpus."""
     app_mod = _make_app(tmp_path, monkeypatch)
     with TestClient(app_mod.app) as c:
-        app_mod.app.state.store.add_memories(create_test_units(scope_id=SCOPE))
+        app_mod.app.state.store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
         yield c
 
 
@@ -50,5 +51,5 @@ def client_and_store(tmp_path, monkeypatch):
     app_mod = _make_app(tmp_path, monkeypatch)
     with TestClient(app_mod.app) as c:
         store = app_mod.app.state.store
-        store.add_memories(create_test_units(scope_id=SCOPE))
+        store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
         yield c, store

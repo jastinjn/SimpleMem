@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from evolver_server.evolver.consolidator import MemoryConsolidator
 from evolver_server.evolver.models import MemoryType, MemoryUnit
 
-from .conftest import _make_store, _make_unit, create_test_units
+from .conftest import UID, _make_store, _make_unit, create_test_units
 
 
 def _consolidator(store, threshold=0.80, decay_factor=0.0, **kwargs) -> MemoryConsolidator:
@@ -50,16 +50,16 @@ class TestExactDuplicateDedup:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        result = _consolidator(store).consolidate("scope")
+        result = _consolidator(store).consolidate(UID, "scope")
         assert result["superseded"] >= 1
-        active_ids = {u.memory_id for u in store.list_active("scope")}
+        active_ids = {u.memory_id for u in store.list_active(UID, "scope")}
         # Exactly one of the pair must remain active.
         assert len(active_ids & {"dup-001", "dup-002"}) == 1
 
     def test_different_content_not_deduped(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        result = _consolidator(store).consolidate("test")
+        result = _consolidator(store).consolidate(UID, "test")
         # All 6 units have distinct content so no exact dups.
         assert result["superseded"] == 0
 
@@ -78,7 +78,7 @@ class TestExactDuplicateDedup:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        result = _consolidator(store).consolidate("scope")
+        result = _consolidator(store).consolidate(UID, "scope")
         # Different types → not deduped.
         assert result["superseded"] == 0
 
@@ -113,9 +113,9 @@ class TestNearDuplicateMerge:
         store = _make_store(tmp_path)
         u1, u2 = self._near_dup_pair()
         store.add_memories([u1, u2])
-        result = _consolidator(store, threshold=0.80).consolidate("nd")
+        result = _consolidator(store, threshold=0.80).consolidate(UID, "nd")
         assert result["superseded"] >= 1
-        active_ids = {u.memory_id for u in store.list_active("nd")}
+        active_ids = {u.memory_id for u in store.list_active(UID, "nd")}
         assert len(active_ids & {"nd-001", "nd-002"}) == 1
 
     def test_tie_break_higher_importance_kept(self, tmp_path):
@@ -123,8 +123,8 @@ class TestNearDuplicateMerge:
         u1, u2 = self._near_dup_pair()
         # u1 has higher importance (0.6 > 0.4) → keep u1.
         store.add_memories([u1, u2])
-        _consolidator(store, threshold=0.80).consolidate("nd")
-        active_ids = {u.memory_id for u in store.list_active("nd")}
+        _consolidator(store, threshold=0.80).consolidate(UID, "nd")
+        active_ids = {u.memory_id for u in store.list_active(UID, "nd")}
         assert "nd-001" in active_ids
         assert "nd-002" not in active_ids
 
@@ -145,8 +145,8 @@ class TestNearDuplicateMerge:
             updated_at="2025-01-01T00:00:02+00:00",  # newer
         )
         store.add_memories([u1, u2])
-        _consolidator(store, threshold=0.80).consolidate("ti")
-        active_ids = {u.memory_id for u in store.list_active("ti")}
+        _consolidator(store, threshold=0.80).consolidate(UID, "ti")
+        active_ids = {u.memory_id for u in store.list_active(UID, "ti")}
         # u2 is newer → should be kept.
         assert "ti-002" in active_ids
         assert "ti-001" not in active_ids
@@ -166,9 +166,9 @@ class TestNearDuplicateMerge:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        _consolidator(store, threshold=0.80).consolidate("dt")
+        _consolidator(store, threshold=0.80).consolidate(UID, "dt")
         # Cross-type merge must not happen.
-        active_ids = {u.memory_id for u in store.list_active("dt")}
+        active_ids = {u.memory_id for u in store.list_active(UID, "dt")}
         assert "dt-001" in active_ids
         assert "dt-002" in active_ids
 
@@ -195,7 +195,7 @@ class TestReinforceSharedEntities:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        result = _consolidator(store).consolidate("re")
+        result = _consolidator(store).consolidate(UID, "re")
         assert result["reinforced"] >= 1
         fetched = store.get_by_ids(["re-001", "re-002"])
         assert any(f.reinforcement_score > 0.0 for f in fetched)
@@ -217,7 +217,7 @@ class TestReinforceSharedEntities:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        _consolidator(store).consolidate("bv")
+        _consolidator(store).consolidate(UID, "bv")
         fetched = {f.memory_id: f for f in store.get_by_ids(["bv-001", "bv-002"])}
         # Boost = min(0.05, 0.3 - 0.0) = 0.05, new = round(0.0 + 0.05, 4) = 0.05
         for f in fetched.values():
@@ -241,7 +241,7 @@ class TestReinforceSharedEntities:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        _consolidator(store).consolidate("cap")
+        _consolidator(store).consolidate(UID, "cap")
         fetched = store.get_by_ids(["cap-001"])
         assert fetched[0].reinforcement_score == pytest.approx(0.30, abs=1e-4)
 
@@ -270,7 +270,7 @@ class TestImportanceDecay:
             decay_factor=0.05,
             min_importance=0.1,
             decay_mode="linear",
-        ).consolidate("decay")
+        ).consolidate(UID, "decay")
         assert result["decayed"] == 1
         fetched = store.get_by_ids(["decay-lin-001"])[0]
         assert fetched.importance == pytest.approx(0.475, abs=1e-4)
@@ -292,7 +292,7 @@ class TestImportanceDecay:
             decay_factor=0.05,
             min_importance=0.1,
             decay_mode="exponential",
-        ).consolidate("decay_exp")
+        ).consolidate(UID, "decay_exp")
         assert result["decayed"] == 1
         fetched = store.get_by_ids(["decay-exp-001"])[0]
         # periods=1.0, new = 0.5 * exp(-0.05 * 1.0)
@@ -310,7 +310,7 @@ class TestImportanceDecay:
             created_at=old_ts,
         )
         store.add_memories([u])
-        result = MemoryConsolidator(store=store, decay_factor=0.0).consolidate("nd")
+        result = MemoryConsolidator(store=store, decay_factor=0.0).consolidate(UID, "nd")
         assert result["decayed"] == 0
 
     def test_decay_clamped_to_min_importance(self, tmp_path, frozen_consolidator_clock):
@@ -331,7 +331,7 @@ class TestImportanceDecay:
             decay_factor=0.5,
             min_importance=0.15,
             decay_mode="linear",
-        ).consolidate("clamp")
+        ).consolidate(UID, "clamp")
         fetched = store.get_by_ids(["clamp-001"])[0]
         assert fetched.importance >= 0.15
 
@@ -362,9 +362,9 @@ class TestWorkingSummaryPruning:
             updated_at="2025-01-01T00:00:03+00:00",
         )
         store.add_memories([ws1, ws2, ws3])
-        result = _consolidator(store).consolidate("ws")
+        result = _consolidator(store).consolidate(UID, "ws")
         assert result["superseded"] == 2
-        active_ids = {u.memory_id for u in store.list_active("ws")}
+        active_ids = {u.memory_id for u in store.list_active(UID, "ws")}
         assert "ws-003" in active_ids
         assert "ws-001" not in active_ids
         assert "ws-002" not in active_ids
@@ -378,7 +378,7 @@ class TestConsolidateReturnValue:
     def test_returns_dict_with_keys(self, tmp_path):
         store = _make_store(tmp_path)
         store.add_memories(create_test_units())
-        result = _consolidator(store).consolidate("test")
+        result = _consolidator(store).consolidate(UID, "test")
         assert "superseded" in result
         assert "decayed" in result
         assert "reinforced" in result
@@ -400,7 +400,7 @@ class TestDryRun:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([ws1, ws2])
-        result = _consolidator(store).dry_run("dry")
+        result = _consolidator(store).dry_run(UID, "dry")
         assert result["stale_summaries"] == 1
 
     def test_dry_run_does_not_mutate(self, tmp_path):
@@ -418,7 +418,7 @@ class TestDryRun:
             updated_at="2025-01-01T00:00:02+00:00",
         )
         store.add_memories([u1, u2])
-        _consolidator(store, threshold=0.80).dry_run("dry2")
-        active_ids = {u.memory_id for u in store.list_active("dry2")}
+        _consolidator(store, threshold=0.80).dry_run(UID, "dry2")
+        active_ids = {u.memory_id for u in store.list_active(UID, "dry2")}
         assert "dm-001" in active_ids
         assert "dm-002" in active_ids

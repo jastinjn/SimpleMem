@@ -36,11 +36,14 @@ import pytest
 from evolver_server.evolver.models import MemoryType, MemoryUnit
 from evolver_server.evolver.store import MemoryStore
 
+# Default test user_id used across all unit tests.
+UID = "user-test"
+
 # ---------------------------------------------------------------------------
 # Corpus helper (analogous to create_test_entries in tests/test_vector_store.py)
 # ---------------------------------------------------------------------------
 
-def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
+def create_test_units(user_id: str = UID, scope_id: str = "test") -> list[MemoryUnit]:
     """Return a fixed list of MemoryUnit objects with explicit timestamps.
 
     All updated_at values are distinct (incrementing seconds) so that
@@ -52,6 +55,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
     return [
         MemoryUnit(
             memory_id="unit-001",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.SEMANTIC,
             content="The project uses PostgreSQL as the primary database",
@@ -66,6 +70,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
         ),
         MemoryUnit(
             memory_id="unit-002",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.EPISODIC,
             content="Alice and Bob discussed the authentication strategy for the API",
@@ -80,6 +85,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
         ),
         MemoryUnit(
             memory_id="unit-003",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.PREFERENCE,
             content="User prefers TypeScript over JavaScript for frontend development",
@@ -94,6 +100,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
         ),
         MemoryUnit(
             memory_id="unit-004",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.PROJECT_STATE,
             content="The deployment pipeline uses Kubernetes for container orchestration",
@@ -108,6 +115,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
         ),
         MemoryUnit(
             memory_id="unit-005",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.PROCEDURAL_OBSERVATION,
             content="Running tests requires the pytest framework with coverage enabled",
@@ -122,6 +130,7 @@ def create_test_units(scope_id: str = "test") -> list[MemoryUnit]:
         ),
         MemoryUnit(
             memory_id="unit-006",
+            user_id=user_id,
             scope_id=scope_id,
             memory_type=MemoryType.SEMANTIC,
             content="Redis is used for caching session tokens and rate limiting",
@@ -160,6 +169,7 @@ def _make_unit(**overrides) -> MemoryUnit:
     ts = f"2025-03-01T00:00:{n:02d}+00:00"
     defaults = dict(
         memory_id=f"mu-{n:04d}",
+        user_id=UID,
         scope_id="test",
         memory_type=MemoryType.SEMANTIC,
         content=f"Memory unit content number {n}",

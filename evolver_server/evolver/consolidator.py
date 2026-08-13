@@ -29,8 +29,8 @@ class MemoryConsolidator:
         self.min_importance = max(0.0, min(1.0, min_importance))
         self.decay_mode = decay_mode if decay_mode in ("linear", "exponential") else "linear"
 
-    def consolidate(self, scope_id: str) -> dict:
-        units = self.store.list_active(scope_id, limit=2000)
+    def consolidate(self, user_id: str, scope_id: str | None = None) -> dict:
+        units = self.store.list_active(user_id, scope_id, limit=2000)
         now = utc_now_iso()
         superseded = 0
 
@@ -72,12 +72,12 @@ class MemoryConsolidator:
             )
         return result
 
-    def dry_run(self, scope_id: str) -> dict:
+    def dry_run(self, user_id: str, scope_id: str | None = None) -> dict:
         """Preview what consolidation would do without applying changes.
 
         Returns counts and details of what would happen.
         """
-        units = self.store.list_active(scope_id, limit=2000)
+        units = self.store.list_active(user_id, scope_id, limit=2000)
 
         # Stale working summaries.
         working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]

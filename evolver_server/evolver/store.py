@@ -100,7 +100,7 @@ class MemoryStore:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
 
-    SCHEMA_VERSION = 6  # Bump on schema changes.
+    SCHEMA_VERSION = 7  # Bump on schema changes.
 
     def _migrate(self) -> None:
         # Schema version tracking.
@@ -116,7 +116,8 @@ class MemoryStore:
             """
             CREATE TABLE IF NOT EXISTS memories (
                 memory_id TEXT PRIMARY KEY,
-                scope_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                scope_id TEXT,
                 memory_type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 summary TEXT DEFAULT '',
@@ -148,6 +149,12 @@ class MemoryStore:
 
             CREATE INDEX IF NOT EXISTS idx_memories_scope_type
             ON memories(scope_id, memory_type);
+
+            CREATE INDEX IF NOT EXISTS idx_memories_user
+            ON memories(user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_memories_user_scope
+            ON memories(user_id, scope_id);
             """
         )
         columns = {
@@ -301,9 +308,9 @@ class MemoryStore:
             "total_removed": removed_links + removed_watches + removed_annotations,
         }
 
-    def export_csv(self, scope_id: str) -> str:
+    def export_csv(self, user_id: str, scope_id: str | None = None) -> str:
         """Export active memories as CSV text."""
-        units = self.list_active(scope_id, limit=10000)
+        units = self.list_active(user_id, scope_id, limit=10000)
         lines = ["memory_id,type,content,importance,confidence,access_count,created_at,tags"]
         for u in units:
             # Escape content for CSV.
@@ -330,6 +337,7 @@ class MemoryStore:
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     memory_id,
+                    user_id,
                     scope_id,
                     content,
                     summary,
@@ -354,9 +362,10 @@ class MemoryStore:
                 (unit.memory_id,),
             )
             self.conn.execute(
-                "INSERT INTO memories_fts(memory_id, scope_id, content, summary, entities_text, topics_text) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO memories_fts(memory_id, user_id, scope_id, content, summary, entities_text, topics_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     unit.memory_id,
+                    unit.user_id,
                     unit.scope_id,
                     unit.content,
                     unit.summary,
@@ -422,16 +431,17 @@ class MemoryStore:
                 self.conn.execute(
                     """
                     INSERT OR REPLACE INTO memories (
-                        memory_id, scope_id, memory_type, content, summary,
+                        memory_id, user_id, scope_id, memory_type, content, summary,
                         source_session_id, source_turn_start, source_turn_end,
                         entities_json, topics_json, importance, confidence,
                         access_count, reinforcement_score, status, supersedes_json,
                         superseded_by, embedding_json, created_at, updated_at,
                         last_accessed_at, expires_at, tags_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         unit.memory_id,
+                        unit.user_id,
                         unit.scope_id,
                         unit.memory_type.value,
                         unit.content,
@@ -457,22 +467,33 @@ class MemoryStore:
                     ),
                 )
                 self._index_fts(unit)
-                self._log_event("create", unit.memory_id, unit.scope_id, f"type={unit.memory_type.value}")
+                self._log_event("create", unit.memory_id, unit.scope_id or "", f"type={unit.memory_type.value}")
                 count += 1
             self.conn.commit()
             return count
 
-    def list_active(self, scope_id: str, limit: int = 100) -> list[MemoryUnit]:
+    def list_active(self, user_id: str, scope_id: str | None = None, limit: int = 100) -> list[MemoryUnit]:
         with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT * FROM memories
-                WHERE scope_id = ? AND status = ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (scope_id, MemoryStatus.ACTIVE.value, limit),
-            ).fetchall()
+            if user_id and scope_id is not None:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE user_id = ? AND scope_id = ? AND status = ? ORDER BY updated_at DESC LIMIT ?",
+                    (user_id, scope_id, MemoryStatus.ACTIVE.value, limit),
+                ).fetchall()
+            elif user_id:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE user_id = ? AND status = ? ORDER BY updated_at DESC LIMIT ?",
+                    (user_id, MemoryStatus.ACTIVE.value, limit),
+                ).fetchall()
+            elif scope_id is not None:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE scope_id = ? AND status = ? ORDER BY updated_at DESC LIMIT ?",
+                    (scope_id, MemoryStatus.ACTIVE.value, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE status = ? ORDER BY updated_at DESC LIMIT ?",
+                    (MemoryStatus.ACTIVE.value, limit),
+                ).fetchall()
         units = [self._row_to_unit(row) for row in rows]
         # Filter out expired memories.
         now_iso = _utc_now_iso()
@@ -690,9 +711,9 @@ class MemoryStore:
             self.conn.commit()
             return True
 
-    def search_by_tag(self, scope_id: str, tag: str, limit: int = 50) -> list[MemoryUnit]:
+    def search_by_tag(self, user_id: str, scope_id: str | None = None, tag: str = "", limit: int = 50) -> list[MemoryUnit]:
         """Find all active memories in a scope that have a given tag."""
-        units = self.list_active(scope_id, limit=limit)
+        units = self.list_active(user_id, scope_id, limit=limit)
         tag_lower = tag.lower().strip()
         return [u for u in units if tag_lower in {t.lower() for t in u.tags}]
 
@@ -828,13 +849,13 @@ class MemoryStore:
                 count += 1
         return count
 
-    def snapshot_scope(self, scope_id: str) -> dict:
+    def snapshot_scope(self, user_id: str, scope_id: str | None = None) -> dict:
         """Create a point-in-time snapshot of a scope for potential rollback.
 
         Returns a snapshot dict containing all active memory data and metadata.
         """
-        units = self.export_scope_json(scope_id)
-        stats = self.get_stats(scope_id)
+        units = self.export_scope_json(user_id, scope_id)
+        stats = self.get_stats(user_id, scope_id)
         return {
             "snapshot_at": _utc_now_iso(),
             "scope_id": scope_id,
@@ -842,20 +863,18 @@ class MemoryStore:
             "memories": units,
         }
 
-    def restore_snapshot(self, snapshot: dict) -> int:
+    def restore_snapshot(self, user_id: str, snapshot: dict) -> int:
         """Restore a scope from a previous snapshot.
 
         Archives all current active memories, then imports the snapshot.
         Returns the number of memories restored.
         """
-        scope_id = snapshot.get("scope_id", "")
-        if not scope_id:
-            return 0
+        scope_id = snapshot.get("scope_id")
         memories = snapshot.get("memories", [])
         if not memories:
             return 0
         # Archive current active memories.
-        current = self.list_active(scope_id, limit=10000)
+        current = self.list_active(user_id, scope_id, limit=10000)
         if current:
             now = _utc_now_iso()
             for u in current:
@@ -879,7 +898,7 @@ class MemoryStore:
         source_terms = set(t.lower() for t in source.topics + source.entities)
         if not source_terms:
             return []
-        units = self.list_active(source.scope_id, limit=500)
+        units = self.list_active(source.user_id, source.scope_id, limit=500)
         scored: list[tuple[MemoryUnit, float]] = []
         for u in units:
             if u.memory_id == memory_id:
@@ -893,7 +912,7 @@ class MemoryStore:
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]
 
-    def compute_health_score(self, scope_id: str) -> dict:
+    def compute_health_score(self, user_id: str, scope_id: str | None = None) -> dict:
         """Compute a single health score (0-100) for a scope.
 
         Factors: access coverage, importance distribution, type diversity,
@@ -902,7 +921,7 @@ class MemoryStore:
         from datetime import datetime as _dt
         from datetime import timezone as _tz
 
-        units = self.list_active(scope_id, limit=5000)
+        units = self.list_active(user_id, scope_id, limit=5000)
         if not units:
             return {"score": 0, "components": {}, "active_count": 0}
 
@@ -950,12 +969,12 @@ class MemoryStore:
             "active_count": len(units),
         }
 
-    def find_duplicates(self, scope_id: str, threshold: float = 0.80) -> list[dict]:
+    def find_duplicates(self, user_id: str, scope_id: str | None = None, threshold: float = 0.80) -> list[dict]:
         """Find near-duplicate memory pairs based on content similarity.
 
         Uses Jaccard similarity on word tokens. Returns pairs above threshold.
         """
-        units = self.list_active(scope_id, limit=500)
+        units = self.list_active(user_id, scope_id, limit=500)
         if len(units) < 2:
             return []
 
@@ -989,7 +1008,7 @@ class MemoryStore:
         duplicates.sort(key=lambda d: d["similarity"], reverse=True)
         return duplicates
 
-    def save_stats_snapshot(self, scope_id: str) -> dict:
+    def save_stats_snapshot(self, user_id: str, scope_id: str | None = None) -> dict:
         """Save a timestamped stats snapshot for trend tracking.
 
         Stores the snapshot in a dedicated table and returns the data.
@@ -1005,8 +1024,8 @@ class MemoryStore:
             )
             """
         )
-        stats = self.get_stats(scope_id)
-        health = self.compute_health_score(scope_id)
+        stats = self.get_stats(user_id, scope_id)
+        health = self.compute_health_score(user_id, scope_id)
         snapshot = {
             "timestamp": _utc_now_iso(),
             "scope_id": scope_id,
@@ -1047,7 +1066,8 @@ class MemoryStore:
 
     def search_advanced(
         self,
-        scope_id: str,
+        user_id: str,
+        scope_id: str | None = None,
         keyword: str = "",
         memory_type: str = "",
         tag: str = "",
@@ -1058,7 +1078,7 @@ class MemoryStore:
 
         All non-empty criteria are ANDed together.
         """
-        units = self.list_active(scope_id, limit=limit * 5)  # over-fetch for filtering
+        units = self.list_active(user_id, scope_id, limit=limit * 5)  # over-fetch for filtering
         results = []
         keyword_lower = keyword.lower() if keyword else ""
         tag_lower = tag.lower().strip() if tag else ""
@@ -1076,13 +1096,13 @@ class MemoryStore:
                 break
         return results
 
-    def compare_scopes(self, scope_a: str, scope_b: str) -> dict:
+    def compare_scopes(self, user_id: str, scope_a: str | None, scope_b: str | None) -> dict:
         """Compare two scopes to find shared and unique content.
 
         Uses content hashing to identify shared facts.
         """
-        units_a = self.list_active(scope_a, limit=1000)
-        units_b = self.list_active(scope_b, limit=1000)
+        units_a = self.list_active(user_id, scope_a, limit=1000)
+        units_b = self.list_active(user_id, scope_b, limit=1000)
 
         content_a = {u.content.strip().lower(): u for u in units_a}
         content_b = {u.content.strip().lower(): u for u in units_b}
@@ -1102,12 +1122,12 @@ class MemoryStore:
             "shared_content": [content_a[k].content[:100] for k in list(shared_keys)[:5]],
         }
 
-    def export_scope_json(self, scope_id: str) -> list[dict]:
+    def export_scope_json(self, user_id: str, scope_id: str | None = None) -> list[dict]:
         """Export all active memories for a scope as JSON-serializable dicts.
 
         Useful for external backup, analysis, or migration.
         """
-        units = self.list_active(scope_id, limit=10000)
+        units = self.list_active(user_id, scope_id, limit=10000)
         result = []
         for u in units:
             result.append({
@@ -1134,28 +1154,31 @@ class MemoryStore:
             })
         return result
 
-    def search_keyword(self, scope_id: str, query_text: str, limit: int = 6) -> list[MemorySearchHit]:
+    def search_keyword(self, user_id: str, scope_id: str | None, query_text: str, limit: int = 6) -> list[MemorySearchHit]:
         terms = [t.lower() for t in _tokenize(query_text) if t]
         if not terms:
             return []
 
         # Try FTS-accelerated search first for large pools.
         if self._fts_available:
-            fts_hits = self._search_fts(scope_id, terms, limit)
+            fts_hits = self._search_fts(user_id, scope_id, terms, limit)
             if fts_hits is not None:
                 return fts_hits
 
         # Fallback: manual IDF-weighted keyword scan.
-        return self._search_keyword_manual(scope_id, terms, limit)
+        return self._search_keyword_manual(user_id, scope_id, terms, limit)
 
-    def _search_fts(self, scope_id: str, terms: list[str], limit: int) -> list[MemorySearchHit] | None:
+    def _search_fts(self, user_id: str, scope_id: str | None, terms: list[str], limit: int) -> list[MemorySearchHit] | None:
         """Use FTS5 MATCH to pre-filter candidates, then IDF-rank them."""
         try:
-            # Build FTS query with scope filter (escape quotes to prevent injection).
-            escaped_scope = scope_id.replace('"', '""')
+            escaped_user = user_id.replace('"', '""')
             escaped_terms = [t.replace('"', '""') for t in terms[:12]]
             term_clause = " OR ".join(f'"{t}"' for t in escaped_terms)
-            fts_query = f'scope_id:"{escaped_scope}" AND ({term_clause})'
+            if scope_id is not None:
+                escaped_scope = scope_id.replace('"', '""')
+                fts_query = f'user_id:"{escaped_user}" AND scope_id:"{escaped_scope}" AND ({term_clause})'
+            else:
+                fts_query = f'user_id:"{escaped_user}" AND ({term_clause})'
             with self._lock:
                 rows = self.conn.execute(
                     "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ?",
@@ -1172,7 +1195,7 @@ class MemoryStore:
         fts_ids = {row[0] for row in rows}
         # Filter to active-only from the main table.
         units = [
-            u for u in self.list_active(scope_id, limit=500)
+            u for u in self.list_active(user_id, scope_id, limit=500)
             if u.memory_id in fts_ids
         ]
         if not units:
@@ -1180,9 +1203,9 @@ class MemoryStore:
 
         return self._rank_with_idf(units, terms, limit)
 
-    def _search_keyword_manual(self, scope_id: str, terms: list[str], limit: int) -> list[MemorySearchHit]:
+    def _search_keyword_manual(self, user_id: str, scope_id: str | None, terms: list[str], limit: int) -> list[MemorySearchHit]:
         """Manual IDF-weighted keyword scan over all active units."""
-        units = self.list_active(scope_id, limit=500)
+        units = self.list_active(user_id, scope_id, limit=500)
         if not units:
             return []
 
@@ -1318,15 +1341,21 @@ class MemoryStore:
         ).fetchall()
         return [self._row_to_unit(r) for r in rows]
 
-    def garbage_collect(self, scope_id: str) -> dict:
+    def garbage_collect(self, user_id: str, scope_id: str | None = None) -> dict:
         """Remove orphaned superseded memories and return cleanup stats."""
-        rows = self.conn.execute(
-            "SELECT memory_id FROM memories WHERE scope_id = ? AND status = 'superseded'",
-            (scope_id,),
-        ).fetchall()
+        if scope_id is not None:
+            rows = self.conn.execute(
+                "SELECT memory_id FROM memories WHERE user_id = ? AND scope_id = ? AND status = 'superseded'",
+                (user_id, scope_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT memory_id FROM memories WHERE user_id = ? AND status = 'superseded'",
+                (user_id,),
+            ).fetchall()
         superseded_ids = {row["memory_id"] for row in rows}
 
-        active_units = self.list_active(scope_id, limit=10000)
+        active_units = self.list_active(user_id, scope_id, limit=10000)
         referenced = set()
         for unit in active_units:
             for sid in unit.supersedes:
@@ -1457,27 +1486,21 @@ class MemoryStore:
             self._log_event("supersede", memory_id, detail=f"by={superseded_by[:36]}")
             self.conn.commit()
 
-    def get_stats(self, scope_id: str) -> dict:
+    def get_stats(self, user_id: str, scope_id: str | None = None) -> dict:
         with self._lock:
+            if scope_id is not None:
+                where = "WHERE user_id = ? AND scope_id = ?"
+                params: tuple = (user_id, scope_id)
+            else:
+                where = "WHERE user_id = ?"
+                params = (user_id,)
             row = self.conn.execute(
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
-                FROM memories
-                WHERE scope_id = ?
-                """,
-                (scope_id,),
+                f"SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active FROM memories {where}",
+                params,
             ).fetchone()
             type_rows = self.conn.execute(
-                """
-                SELECT memory_type, COUNT(*) AS count
-                FROM memories
-                WHERE scope_id = ? AND status = 'active'
-                GROUP BY memory_type
-                ORDER BY count DESC, memory_type ASC
-                """,
-                (scope_id,),
+                f"SELECT memory_type, COUNT(*) AS count FROM memories {where} AND status = 'active' GROUP BY memory_type ORDER BY count DESC, memory_type ASC",
+                params,
             ).fetchall()
         return {
             "total": int(row["total"] or 0),
@@ -1491,6 +1514,7 @@ class MemoryStore:
     def _row_to_unit(self, row: sqlite3.Row) -> MemoryUnit:
         return MemoryUnit(
             memory_id=row["memory_id"],
+            user_id=row["user_id"],
             scope_id=row["scope_id"],
             memory_type=MemoryType(row["memory_type"]),
             content=row["content"],
@@ -1670,9 +1694,9 @@ class MemoryStore:
         return [self._row_to_unit(r) for r in rows]
 
 
-    def sample_memories(self, scope_id: str, count: int = 5) -> list[MemoryUnit]:
+    def sample_memories(self, user_id: str, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
         """Return a random sample of active memories for exploration/testing."""
-        units = self.list_active(scope_id, limit=500)
+        units = self.list_active(user_id, scope_id, limit=500)
         if len(units) <= count:
             return units
         import random

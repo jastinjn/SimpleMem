@@ -1,10 +1,11 @@
 """FastAPI app exposing the evolver memory engine as a REST API.
 
 One shared ``MemoryStore`` + one process-wide ``MemoryManager`` are created in the
-lifespan handler. All tenant isolation is via the ``scope_id`` passed on every
-call — a single shared SQLite DB with a ``scope_id`` column (the evolver's native
-model). The store's internal lock serializes SQLite access, so endpoints are
-defined as sync ``def`` and run in Starlette's threadpool.
+lifespan handler. Tenant isolation is via the ``user_id`` (required) and optional
+``scope_id`` passed on every call — a single shared SQLite DB with ``user_id`` and
+``scope_id`` columns (the evolver's native model). The store's internal lock
+serializes SQLite access, so endpoints are defined as sync ``def`` and run in
+Starlette's threadpool.
 """
 
 from __future__ import annotations
@@ -37,11 +38,8 @@ from .models import (
 async def lifespan(app: FastAPI):
     settings = get_settings()
     store = MemoryStore(settings.db_path)
-    # scope_id="default" here is only a fallback; every request passes an explicit
-    # scope_id, so the manager-level default is never relied upon.
     mgr = MemoryManager(
         store=store,
-        scope_id="default",
         retrieval_mode=settings.retrieval_mode,
         auto_consolidate=True,
     )
@@ -60,7 +58,7 @@ settings = get_settings()
 app = FastAPI(
     title="SimpleMem Evolver API",
     description="Standalone REST API over the evolver hybrid memory engine. No auth; "
-    "every endpoint requires a scope_id.",
+    "every endpoint requires a user_id.",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -104,11 +102,17 @@ def memory_add(req: AddRequest) -> AddResponse:
         added = _mgr(app).ingest_session_turns(
             req.session_id,
             [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
+            user_id=req.user_id,
             scope_id=req.scope_id,
         )
     except Exception as e:  # noqa: BLE001 - surface as 500 for the caller
         raise HTTPException(status_code=500, detail=str(e)) from e
-    return AddResponse(scope_id=req.scope_id, session_id=req.session_id, units_added=added)
+    return AddResponse(
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+        session_id=req.session_id,
+        units_added=added,
+    )
 
 
 @app.post("/memory/add_batch", response_model=AddResponse)
@@ -118,11 +122,17 @@ def memory_add_batch(req: AddBatchRequest) -> AddResponse:
         added = _mgr(app).ingest_session_turns(
             req.session_id,
             [t.model_dump() for t in req.turns],
+            user_id=req.user_id,
             scope_id=req.scope_id,
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
-    return AddResponse(scope_id=req.scope_id, session_id=req.session_id, units_added=added)
+    return AddResponse(
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+        session_id=req.session_id,
+        units_added=added,
+    )
 
 
 @app.post("/memory/retrieve", response_model=RetrieveResponse)
@@ -130,6 +140,7 @@ def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
     """Hybrid (semantic + lexical) search within the caller's scope."""
     try:
         query = MemoryQuery(
+            user_id=req.user_id,
             scope_id=req.scope_id,
             query_text=req.query,
             top_k=req.top_k,
@@ -154,7 +165,11 @@ def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
         for h in hits
     ]
     return RetrieveResponse(
-        scope_id=req.scope_id, query=req.query, results=results, total=len(results)
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+        query=req.query,
+        results=results,
+        total=len(results),
     )
 
 
@@ -162,11 +177,12 @@ def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
 def memory_clear(req: ClearRequest) -> ClearResponse:
     """Soft-clear the caller's scope (archive all non-pinned active memories)."""
     try:
-        result = _mgr(app).archive_scope(req.scope_id)
+        result = _mgr(app).archive_scope(req.user_id, req.scope_id)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
     return ClearResponse(
-        scope_id=result.get("scope_id", req.scope_id),
+        user_id=req.user_id,
+        scope_id=req.scope_id,
         archived=int(result.get("archived", 0)),
         pinned_kept=int(result.get("pinned_kept", 0)),
         total_before=int(result.get("total_before", 0)),
@@ -177,10 +193,11 @@ def memory_clear(req: ClearRequest) -> ClearResponse:
 def memory_stats(req: StatsRequest) -> StatsResponse:
     """Return memory counts for the caller's scope."""
     try:
-        stats = _mgr(app).get_scope_stats(req.scope_id)
+        stats = _mgr(app).get_scope_stats(req.user_id, req.scope_id)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
     return StatsResponse(
+        user_id=req.user_id,
         scope_id=req.scope_id,
         entry_count=int(stats.get("active", 0)),
         total=int(stats.get("total", 0)),

@@ -43,7 +43,8 @@ class MemoryRetriever:
         # Try expanded query if direct keyword search yields too few results.
         limit = min(query.top_k, self.policy.max_injected_units)
         hits = self.store.search_keyword(
-            scope_id=query.scope_id,
+            query.user_id,
+            query.scope_id,
             query_text=query.query_text,
             limit=limit,
         )
@@ -53,7 +54,8 @@ class MemoryRetriever:
             if expanded != query.query_text:
                 expanded_flag = True
                 extra = self.store.search_keyword(
-                    scope_id=query.scope_id,
+                    query.user_id,
+                    query.scope_id,
                     query_text=expanded,
                     limit=limit,
                 )
@@ -95,7 +97,7 @@ class MemoryRetriever:
         if not query_terms:
             return []
 
-        units = self.store.list_active(query.scope_id, limit=500)
+        units = self.store.list_active(query.user_id, query.scope_id, limit=500)
         if not units:
             return []
 
@@ -181,7 +183,7 @@ class MemoryRetriever:
             return []
 
         hits: list[MemorySearchHit] = []
-        for unit in self.store.list_active(query.scope_id, limit=500):
+        for unit in self.store.list_active(query.user_id, query.scope_id, limit=500):
             if query.include_types and unit.memory_type not in query.include_types:
                 continue
             if not unit.embedding:
