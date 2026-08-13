@@ -28,7 +28,7 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     settings = get_settings()
     context.configure(
-        url=settings.database_url,
+        url=settings.DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -45,7 +45,7 @@ def do_run_migrations(connection):
 
 async def run_migrations_online() -> None:
     settings = get_settings()
-    connectable = create_async_engine(settings.database_url, pool_pre_ping=True)
+    connectable = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()

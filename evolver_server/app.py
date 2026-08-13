@@ -37,7 +37,7 @@ from .models import (
 async def lifespan(app: FastAPI):
     settings = get_settings()
     engine = build_engine(
-        settings.database_url,
+        settings.DATABASE_URL,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
     )
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.mgr = mgr
     print(
-        f"[EvolverAPI] ready — db={settings.database_url!r} "
+        f"[EvolverAPI] ready — db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} auto_consolidate=True"
     )
     yield

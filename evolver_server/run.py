@@ -17,8 +17,8 @@ from evolver_server.config import get_settings
 def main() -> None:
     settings = get_settings()
     parser = argparse.ArgumentParser(description="SimpleMem Evolver API server")
-    parser.add_argument("--host", default=settings.host)
-    parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument("--host", default=settings.FASTAPI_HOST)
+    parser.add_argument("--port", type=int, default=settings.FASTAPI_PORT)
     parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes")
     args = parser.parse_args()
 

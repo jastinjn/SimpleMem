@@ -6,9 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    host: str = "0.0.0.0"
-    port: int = 8100
-    database_url: str = "postgresql+asyncpg://postgres:password@localhost:5442/simplemem"
+    FASTAPI_HOST: str = "localhost"
+    FASTAPI_PORT: int = 8100
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5442/simplemem"
     embedding_dim: int = 1024
     db_pool_size: int = 10
     db_max_overflow: int = 20
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     default_top_k: int = 10
     cors_allowed_origins: str = "*"
 
-    model_config = SettingsConfigDict(env_prefix="EVOLVER_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache
