@@ -22,9 +22,9 @@ All settings are configured via `.env` (see `.env.example`).
 
 ## Ingestion modes
 
-**`pattern`** (default fallback, no API key needed): per-turn regex/keyword extraction. Fast and deterministic. Produces `EPISODIC`, `SEMANTIC`, and `PREFERENCE` units based on keyword matching.
+**`llm`** (default): sliding-window LLM extraction via `llm_extractor.py`. Sends windows of up to 15 turns to OpenAI using structured outputs (Pydantic `client.responses.parse`). Infers `memory_type`, `importance`, and `confidence` per unit. Supports all four assignable types: `preference`, `procedural_observation`, `semantic`, `episodic`.
 
-**`llm`** (recommended): sliding-window LLM extraction via `llm_extractor.py`. Sends windows of up to 15 turns to OpenAI using structured outputs (Pydantic `client.responses.parse`). Infers `memory_type`, `importance`, and `confidence` per unit. Supports all four assignable types: `preference`, `procedural_observation`, `semantic`, `episodic`.
+**`pattern`**: per-turn regex/keyword extraction. Fast and deterministic, no API key required. Produces `EPISODIC`, `SEMANTIC`, and `PREFERENCE` units based on keyword matching. Use when extraction latency or API cost is a priority over quality.
 
 ## Migrations
 
