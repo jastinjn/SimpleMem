@@ -164,23 +164,3 @@ class MemoryAnnotation(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class ScopeAccess(Base):
-    __tablename__ = "scope_access"
-    __table_args__ = (
-        UniqueConstraint("scope_id", "principal", "permission", name="uq_scope_access"),
-    )
-
-    scope_id: Mapped[str] = mapped_column(String, nullable=False, primary_key=True)
-    principal: Mapped[str] = mapped_column(String, nullable=False, primary_key=True)
-    permission: Mapped[str] = mapped_column(String, nullable=False, primary_key=True, default="read")
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class StatsSnapshot(Base):
-    __tablename__ = "stats_snapshots"
-
-    snapshot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    timestamp: Mapped[str] = mapped_column(String, nullable=False)
-    user_id: Mapped[str] = mapped_column(String, nullable=False)
-    scope_id: Mapped[str] = mapped_column(String, nullable=False)
-    data_json: Mapped[str] = mapped_column(Text, nullable=False)

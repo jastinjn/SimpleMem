@@ -78,5 +78,5 @@ async def _clean_tables(test_engine):
     async with test_engine.begin() as conn:
         await conn.execute(text(
             "TRUNCATE memories, memory_events, memory_links, memory_watches, "
-            "memory_annotations, scope_access, stats_snapshots RESTART IDENTITY CASCADE"
+            "memory_annotations RESTART IDENTITY CASCADE"
         ))

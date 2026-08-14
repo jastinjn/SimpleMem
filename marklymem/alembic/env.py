@@ -11,8 +11,6 @@ from marklymem.evolver.schema import (  # noqa: F401 — register all models
     MemoryEvent,
     MemoryLink,
     MemoryWatch,
-    ScopeAccess,
-    StatsSnapshot,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 

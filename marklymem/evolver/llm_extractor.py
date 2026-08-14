@@ -163,7 +163,7 @@ class LLMMemoryExtractor:
         turns: list[dict],
         user_id: str,
         scope_id: str,
-        session_id: str,
+        session_id: str | None,
     ) -> list[MemoryUnit]:
         """Extract memory units from all turns of one session.
 
@@ -240,7 +240,7 @@ class LLMMemoryExtractor:
         end: int,
         user_id: str,
         scope_id: str,
-        session_id: str,
+        session_id: str | None,
     ) -> list[MemoryUnit]:
         dialogue_text = self._render_dialogue(turns)
         if len(dialogue_text.strip()) < 30:
@@ -278,7 +278,7 @@ class LLMMemoryExtractor:
         end: int,
         user_id: str,
         scope_id: str,
-        session_id: str,
+        session_id: str | None,
     ) -> list[MemoryUnit]:
         units: list[MemoryUnit] = []
         for entry in entries:

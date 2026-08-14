@@ -212,11 +212,6 @@ class MemoryManager:
             stats.get("active", 0),
             stats.get("dominant_type", ""),
         )
-        # Auto-save stats snapshot after ingestion for trend tracking.
-        try:
-            await self.store.save_stats_snapshot(uid, scope)
-        except Exception:
-            pass  # Best-effort stats tracking.
         self._notify("ingest", scope_id=scope, session_id=session_id, added=added)
         return {
             "added": added,
@@ -677,16 +672,6 @@ class MemoryManager:
         """Preview what consolidation would do without applying changes."""
         scope = scope_id or self.scope_id
         return await self.consolidator.dry_run(self.user_id, scope)
-
-    async def save_stats_snapshot(self, scope_id: str | None = None) -> dict:
-        """Save a timestamped stats snapshot for trend tracking."""
-        scope = scope_id or self.scope_id
-        return await self.store.save_stats_snapshot(self.user_id, scope)
-
-    async def get_stats_trend(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
-        """Get stats trend over time."""
-        scope = scope_id or self.scope_id
-        return await self.store.get_stats_trend(self.user_id, scope, limit)
 
     async def search_advanced(
         self,
@@ -1188,24 +1173,6 @@ class MemoryManager:
             scored.append(result)
         scored.sort(key=lambda x: x["score"])
         return scored[:limit]
-
-    # --- Scope access control ---
-
-    async def grant_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
-        """Grant a principal access to a scope."""
-        return await self.store.grant_access(scope_id, principal, permission)
-
-    async def revoke_scope_access(self, scope_id: str, principal: str, permission: str | None = None) -> int:
-        """Revoke a principal's access to a scope."""
-        return await self.store.revoke_access(scope_id, principal, permission)
-
-    async def check_scope_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
-        """Check if a principal can access a scope."""
-        return await self.store.check_access(scope_id, principal, permission)
-
-    async def list_scope_grants(self, scope_id: str) -> list[dict]:
-        """List all access grants for a scope."""
-        return await self.store.list_scope_grants(scope_id)
 
     # --- Memory watches ---
 
@@ -1953,38 +1920,6 @@ class MemoryManager:
             "skipped": skipped,
             "source_scope": source_scope,
             "target_scope": target_scope,
-        }
-
-    async def compute_stats_delta(self, scope_id: str | None = None) -> dict:
-        """Compare current stats with the most recent snapshot to show changes.
-
-        Returns deltas for key metrics.
-        """
-        scope = scope_id or self.scope_id
-        current = await self.get_scope_stats(scope)
-        trend = await self.get_stats_trend(scope, limit=2)
-
-        if not trend or len(trend) < 1:
-            return {
-                "has_previous": False,
-                "current": current,
-                "deltas": {},
-            }
-
-        # The most recent snapshot is trend[0] (most recent first).
-        previous = trend[0].get("stats", {})
-        deltas = {}
-        for key in ["active", "total", "superseded"]:
-            cur_val = current.get(key, 0)
-            prev_val = previous.get(key, 0)
-            if isinstance(cur_val, (int, float)) and isinstance(prev_val, (int, float)):
-                deltas[key] = cur_val - prev_val
-
-        return {
-            "has_previous": True,
-            "current": current,
-            "previous_snapshot": previous,
-            "deltas": deltas,
         }
 
     async def diff_memories(self, memory_id_a: str, memory_id_b: str) -> dict:
@@ -3866,41 +3801,6 @@ class MemoryManager:
             for u in units
         ]
 
-    async def compare_snapshots(
-        self,
-        scope_id: str | None = None,
-    ) -> dict:
-        """Compare current stats with the most recent snapshot.
-
-        Returns delta information showing what changed since last snapshot.
-        """
-        scope = scope_id or self.scope_id
-        current_stats = await self.store.get_stats(self.user_id, scope)
-        trends = await self.store.get_stats_trend(self.user_id, scope, limit=2)
-
-        if len(trends) < 1:
-            return {
-                "scope_id": scope,
-                "current": current_stats,
-                "previous": None,
-                "delta": None,
-                "message": "No previous snapshots available",
-            }
-
-        previous = trends[0]
-        delta = {}
-        for key in ["active", "superseded"]:
-            curr_val = current_stats.get(key, 0)
-            prev_val = previous.get(key, 0)
-            delta[key] = curr_val - prev_val
-
-        return {
-            "scope_id": scope,
-            "current": current_stats,
-            "previous": previous,
-            "delta": delta,
-        }
-
     async def archive_scope(self, user_id: str, scope_id: str | None = None) -> dict:
         """Archive all active memories in a scope.
 
@@ -4204,7 +4104,7 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
 async def _extract_memory_units_for_turn(
     user_id: str,
     scope_id: str,
-    session_id: str,
+    session_id: str | None,
     turn_index: int,
     prompt_text: str,
     response_text: str,

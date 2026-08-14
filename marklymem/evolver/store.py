@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import math
 from typing import Iterable
@@ -18,8 +17,6 @@ from .schema import (
     MemoryEvent,
     MemoryLink,
     MemoryWatch,
-    ScopeAccess,
-    StatsSnapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -516,47 +513,6 @@ class MemoryStore:
             for r in rows
         ]
 
-    # ------------------------------------------------------------------
-    # Stats snapshots
-    # ------------------------------------------------------------------
-
-    async def save_stats_snapshot(self, user_id: str, scope_id: str | None = None) -> dict:
-        stats = await self.get_stats(user_id, scope_id)
-        health = await self.compute_health_score(user_id, scope_id)
-        snapshot = {
-            "timestamp": _utc_now_iso(),
-            "scope_id": scope_id,
-            "active": stats.get("active", 0),
-            "total": stats.get("total", 0),
-            "active_by_type": stats.get("active_by_type", {}),
-            "health_score": health.get("score", 0),
-        }
-        async with self._sm() as s:
-            s.add(StatsSnapshot(
-                timestamp=snapshot["timestamp"],
-                user_id=user_id,
-                scope_id=scope_id or "",
-                data_json=json.dumps(snapshot, ensure_ascii=False),
-            ))
-            await s.commit()
-        return snapshot
-
-    async def get_stats_trend(self, user_id: str, scope_id: str, limit: int = 20) -> list[dict]:
-        async with self._sm() as s:
-            rows = (await s.execute(
-                select(StatsSnapshot.data_json)
-                .where((StatsSnapshot.user_id == user_id) & (StatsSnapshot.scope_id == scope_id))
-                .order_by(StatsSnapshot.snapshot_id.desc())
-                .limit(limit)
-            )).scalars().all()
-        snapshots = []
-        for raw in rows:
-            try:
-                snapshots.append(json.loads(raw))
-            except Exception:
-                pass
-        snapshots.reverse()
-        return snapshots
 
     # ------------------------------------------------------------------
     # Tags
@@ -912,56 +868,6 @@ class MemoryStore:
             )
             await s.commit()
 
-    # ------------------------------------------------------------------
-    # Scope access control
-    # ------------------------------------------------------------------
-
-    async def grant_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
-        if permission not in ("read", "write", "admin"):
-            return False
-        async with self._sm() as s:
-            try:
-                s.add(ScopeAccess(scope_id=scope_id, principal=principal, permission=permission, created_at=_utc_now_iso()))
-                await s.commit()
-                return True
-            except IntegrityError:
-                await s.rollback()
-                return False
-
-    async def revoke_access(self, scope_id: str, principal: str, permission: str | None = None) -> int:
-        async with self._sm() as s:
-            cond = (ScopeAccess.scope_id == scope_id) & (ScopeAccess.principal == principal)
-            if permission:
-                cond = cond & (ScopeAccess.permission == permission)
-            result = await s.execute(delete(ScopeAccess).where(cond))
-            await s.commit()
-        return result.rowcount or 0  # type: ignore[union-attr]
-
-    async def check_access(self, scope_id: str, principal: str, permission: str = "read") -> bool:
-        async with self._sm() as s:
-            count = (await s.execute(
-                select(func.count()).where(
-                    (ScopeAccess.scope_id == scope_id) & (ScopeAccess.principal == principal)
-                    & ((ScopeAccess.permission == permission) | (ScopeAccess.permission == "admin"))
-                )
-            )).scalar() or 0
-        return count > 0
-
-    async def list_scope_grants(self, scope_id: str) -> list[dict]:
-        async with self._sm() as s:
-            rows = (await s.execute(
-                select(ScopeAccess).where(ScopeAccess.scope_id == scope_id)
-                .order_by(ScopeAccess.principal, ScopeAccess.permission)
-            )).scalars().all()
-        return [{"scope_id": r.scope_id, "principal": r.principal, "permission": r.permission, "created_at": r.created_at} for r in rows]
-
-    async def list_principal_scopes(self, principal: str) -> list[dict]:
-        async with self._sm() as s:
-            rows = (await s.execute(
-                select(ScopeAccess).where(ScopeAccess.principal == principal)
-                .order_by(ScopeAccess.scope_id, ScopeAccess.permission)
-            )).scalars().all()
-        return [{"scope_id": r.scope_id, "principal": r.principal, "permission": r.permission, "created_at": r.created_at} for r in rows]
 
     # ------------------------------------------------------------------
     # Memory links
