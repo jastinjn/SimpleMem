@@ -37,7 +37,7 @@ class Memory(Base):
     scope_id: Mapped[str | None] = mapped_column(String, nullable=True)
     memory_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    source_session_id: Mapped[str] = mapped_column(String, default="")
+    source_session_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     source_turn_start: Mapped[int] = mapped_column(Integer, default=0)
     source_turn_end: Mapped[int] = mapped_column(Integer, default=0)
     entities: Mapped[list] = mapped_column(JSONB, default=list)
@@ -70,7 +70,7 @@ class Memory(Base):
             scope_id=self.scope_id,
             memory_type=MemoryType(self.memory_type),
             content=self.content,
-            source_session_id=self.source_session_id or "",
+            source_session_id=self.source_session_id or None,
             source_turn_start=int(self.source_turn_start or 0),
             source_turn_end=int(self.source_turn_end or 0),
             entities=list(self.entities or []),

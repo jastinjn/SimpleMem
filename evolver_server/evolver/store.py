@@ -638,7 +638,7 @@ class MemoryStore:
                 scope_id=scope,
                 memory_type=mt,
                 content=item.get("content", ""),
-                source_session_id=item.get("source_session_id", ""),
+                source_session_id=item.get("source_session_id") or None,
                 source_turn_start=int(item.get("source_turn_start", 0)),
                 source_turn_end=int(item.get("source_turn_end", 0)),
                 entities=item.get("entities", []),

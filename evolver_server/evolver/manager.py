@@ -89,7 +89,7 @@ class MemoryManager:
 
     async def ingest_session_turns(
         self,
-        session_id: str,
+        session_id: str | None,
         turns: list[dict],
         user_id: str | None = None,
         scope_id: str | None = None,

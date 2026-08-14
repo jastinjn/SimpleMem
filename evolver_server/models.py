@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 class AddRequest(BaseModel):
     user_id: str = Field(..., min_length=1, description="Owner of the memory")
     scope_id: str | None = Field(None, description="Optional sub-context within the user")
-    session_id: str = Field("api", description="Groups turns from the same conversation")
+    session_id: str | None = Field(None, description="Groups turns from the same conversation")
     prompt_text: str = Field("", description="User side of the turn")
     response_text: str = Field("", description="Assistant side of the turn")
     @model_validator(mode="after")
@@ -34,13 +34,14 @@ class TurnIn(BaseModel):
 class AddBatchRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     scope_id: str | None = None
-    session_id: str = Field("api")
+    session_id: str | None = Field(None)
     turns: list[TurnIn] = Field(..., min_length=1, max_length=50)
 
 
 class RetrieveRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     scope_id: str | None = None
+    session_id: str | None = None
     query: str = Field(..., min_length=1)
     top_k: int = Field(10, ge=1, le=100)
 
@@ -61,7 +62,7 @@ class StatsRequest(BaseModel):
 class AddResponse(BaseModel):
     user_id: str
     scope_id: str | None
-    session_id: str
+    session_id: str | None
     units_added: int
     units_consolidated: int
 

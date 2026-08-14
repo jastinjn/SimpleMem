@@ -165,6 +165,7 @@ async def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
         query = MemoryQuery(
             user_id=req.user_id,
             scope_id=req.scope_id,
+            session_id=req.session_id,
             query_text=req.query,
             top_k=req.top_k,
         )
