@@ -81,8 +81,10 @@ async def lifespan(app: FastAPI):
         f"tracing={'on' if tracing_enabled else 'off'}"
     )
     yield
-    await engine.dispose()
-    telemetry.shutdown_telemetry()
+    try:
+        await engine.dispose()
+    finally:
+        await telemetry.shutdown_telemetry()
 
 
 settings = get_settings()

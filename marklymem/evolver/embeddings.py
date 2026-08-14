@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 class BaseEmbedder(ABC):
     """Abstract base class for memory embedders."""
 
-    last_input_tokens: int | None = None
-
     @abstractmethod
     def encode(self, text: str) -> list[float]:
         """Encode a single text into a vector."""
@@ -219,15 +217,22 @@ class OpenAIEmbedder(BaseEmbedder):
         return [], 0  # unreachable
 
     def encode(self, text: str) -> list[float]:
-        embs, tokens = self._call_api([text])
-        self.last_input_tokens = tokens or None
+        with telemetry.span(
+            "embedding",
+            embedder_type=type(self).__name__,
+            model=self._model,
+            embedding_dim=self._dimensions,
+            text_count=1,
+        ) as sp:
+            embs, tokens = self._call_api([text])
+            telemetry.record_usage(sp, input_tokens=tokens or None, output_tokens=None)
         return embs[0]
 
     async def encode_batch(self, texts: list[str]) -> list[list[float]]:
         """Encode texts in parallel chunks of ``_CHUNK_SIZE``.
 
-        Each chunk is one OpenAI API call; when tracing is active each becomes a
-        child ``embedding.chunk`` generation span under the caller's active span.
+        Emits a parent ``embedding`` span covering the whole batch, with one
+        ``embedding.chunk`` generation span per API call nested inside it.
         """
         if not texts:
             return []
@@ -239,13 +244,20 @@ class OpenAIEmbedder(BaseEmbedder):
                 telemetry.record_usage(gen, input_tokens=tokens or None, output_tokens=None)
             return embs, tokens
 
-        chunk_results = await asyncio.gather(*(_call_chunk(chunk) for chunk in chunks))
-        results: list[list[float]] = []
-        total_tokens = 0
-        for embs, tokens in chunk_results:
-            results.extend(embs)
-            total_tokens += tokens
-        self.last_input_tokens = total_tokens or None
+        with telemetry.span(
+            "embedding",
+            embedder_type=type(self).__name__,
+            model=self._model,
+            embedding_dim=self._dimensions,
+            text_count=len(texts),
+        ) as batch_span:
+            chunk_results = await asyncio.gather(*(_call_chunk(chunk) for chunk in chunks))
+            results: list[list[float]] = []
+            total_tokens = 0
+            for embs, tokens in chunk_results:
+                results.extend(embs)
+                total_tokens += tokens
+            telemetry.record_usage(batch_span, input_tokens=total_tokens or None, output_tokens=None)
         return results
 
 

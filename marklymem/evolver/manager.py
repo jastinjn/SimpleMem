@@ -202,16 +202,7 @@ class MemoryManager:
                 " ".join([u.content, " ".join(u.topics), " ".join(u.entities)])
                 for u in units
             ]
-            with telemetry.span(
-                "embedding",
-                embedder_type=type(self.embedder).__name__,
-                text_count=len(texts),
-                embedding_dim=self.embedder.dimensions,
-                model=self.embedder.model,
-            ) as emb_span:
-                embeddings = await self.embedder.encode_batch(texts)
-                if self.embedder.last_input_tokens is not None:
-                    telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
+            embeddings = await self.embedder.encode_batch(texts)
             for unit, emb in zip(units, embeddings):
                 unit.embedding = emb
 

@@ -54,8 +54,19 @@ uv run pyright .                  # type check
 
 **Consolidation** — runs automatically after every ingest. Supersedes exact duplicates and near-duplicates (Jaccard ≥ 0.80). Applies importance decay to memories not accessed in 30+ days. Boosts reinforcement score for memories sharing entities.
 
+## Observability
+
+`marklymem/telemetry.py` is a context-manager facade over OpenTelemetry that exports traces to a self-hosted Langfuse instance via OTLP/HTTP. Tracing is opt-in (`OTEL_ENABLED=true` + Langfuse host/keys). When disabled, every facade call is an OTel no-op — zero overhead.
+
+Two operations are traced end-to-end:
+
+- **`memory.ingest`**: `extract.session` → per-window `extract.window` generation spans (LLM, tokens) → `embedding` batch span with per-chunk `embedding.chunk` generation spans → `consolidate` span (output = content of superseded memories).
+- **`memory.retrieve`**: `embedding` span (model, token count) → output = retrieved memories with scores and content.
+
+Call sites use `telemetry.trace()` (root), `telemetry.span()` (child), `telemetry.generation()` (LLM/embedding API call). SDK imports are local to `setup_telemetry()` — no hard SDK dep at import time. `setup_telemetry(settings)` is called in the FastAPI lifespan; `shutdown_telemetry()` flushes the batch processor on exit.
+
 ## Key Constraints
 
 - `user_id` is required on every store/retriever call — never omit it.
 - `scope_id=None` means no scope filter (all scopes), not a default scope.
-- Self-evolution, policy optimisation, telemetry, and benchmark modules have been removed — the engine is inference-only.
+- Self-evolution, policy optimisation, and benchmark modules have been removed — the engine is inference-only.

@@ -100,15 +100,7 @@ class MemoryRetriever:
 
         limit = min(query.top_k * 4, 200)
         if self.embedder:
-            with telemetry.span(
-                "embedding",
-                embedder_type=type(self.embedder).__name__,
-                embedding_dim=self.embedder.dimensions,
-                model=self.embedder.model,
-            ) as emb_span:
-                query_embedding = self.embedder.encode(query.query_text)
-                if self.embedder.last_input_tokens is not None:
-                    telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
+            query_embedding = self.embedder.encode(query.query_text)
         else:
             query_embedding = []
 
@@ -203,15 +195,7 @@ class MemoryRetriever:
     async def _retrieve_embedding(self, query: MemoryQuery) -> list[MemorySearchHit]:
         if self.embedder is None:
             return []
-        with telemetry.span(
-            "embedding",
-            embedder_type=type(self.embedder).__name__,
-            embedding_dim=self.embedder.dimensions,
-            model=self.embedder.model,
-        ) as emb_span:
-            query_embedding = self.embedder.encode(query.query_text)
-            if self.embedder.last_input_tokens is not None:
-                telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
+        query_embedding = self.embedder.encode(query.query_text)
         if not query_embedding:
             return []
 

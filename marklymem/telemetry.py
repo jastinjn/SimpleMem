@@ -24,6 +24,7 @@ set. When enabled, spans carry raw content (dialogue, memory text, retrieved hit
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -93,13 +94,18 @@ def setup_telemetry(settings) -> bool:
     return True
 
 
-def shutdown_telemetry() -> None:
-    """Flush and shut down the batch span processor. Call once on app shutdown."""
+async def shutdown_telemetry() -> None:
+    """Flush and shut down the batch span processor. Call once on app shutdown.
+
+    ``BatchSpanProcessor.shutdown()`` blocks while flushing pending spans over the
+    network. Running it in a thread prevents blocking the event loop during teardown.
+    """
     global _provider, _enabled
     if _provider is not None:
-        _provider.shutdown()
+        provider = _provider
         _provider = None
         _enabled = False
+        await asyncio.to_thread(provider.shutdown)
 
 
 def is_enabled() -> bool:
