@@ -187,18 +187,7 @@ class MemoryManager:
                 unit.embedding = emb
 
         added = await self.store.add_memories(units)
-        for unit in units:
-            logger.info(
-                "[Memory] persisted unit memory_id=%s type=%s importance=%.2f confidence=%.2f "
-                "topics=%s entities=%s content=%.120r",
-                unit.memory_id,
-                unit.memory_type.value,
-                unit.importance,
-                unit.confidence,
-                unit.topics,
-                unit.entities,
-                unit.content,
-            )
+
         await self.clear_cache()
         consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:

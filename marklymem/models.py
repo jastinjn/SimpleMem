@@ -13,12 +13,16 @@ from pydantic import BaseModel, Field, model_validator
 # --------------------------------------------------------------------------- #
 # Requests
 # --------------------------------------------------------------------------- #
-class AddRequest(BaseModel):
+class ScopedRequest(BaseModel):
     user_id: str = Field(..., min_length=1, description="Owner of the memory")
     scope_id: str | None = Field(None, description="Optional sub-context within the user")
+
+
+class AddRequest(ScopedRequest):
     session_id: str | None = Field(None, description="Groups turns from the same conversation")
     prompt_text: str = Field("", description="User side of the turn")
     response_text: str = Field("", description="Assistant side of the turn")
+
     @model_validator(mode="after")
     def _at_least_one_side(self) -> "AddRequest":
         if not self.prompt_text.strip() and not self.response_text.strip():
@@ -31,29 +35,16 @@ class TurnIn(BaseModel):
     response_text: str = ""
 
 
-class AddBatchRequest(BaseModel):
-    user_id: str = Field(..., min_length=1)
-    scope_id: str | None = None
+class AddBatchRequest(ScopedRequest):
     session_id: str | None = Field(None)
     turns: list[TurnIn] = Field(..., min_length=1, max_length=50)
 
 
-class RetrieveRequest(BaseModel):
-    user_id: str = Field(..., min_length=1)
-    scope_id: str | None = None
+class RetrieveRequest(ScopedRequest):
     session_id: str | None = None
     query: str = Field(..., min_length=1)
     top_k: int = Field(10, ge=1, le=100)
 
-
-class ClearRequest(BaseModel):
-    user_id: str = Field(..., min_length=1)
-    scope_id: str | None = None
-
-
-class StatsRequest(BaseModel):
-    user_id: str = Field(..., min_length=1)
-    scope_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #

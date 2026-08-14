@@ -8,9 +8,12 @@ lifespan handler. Tenant isolation is via the ``user_id`` (required) and optiona
 
 from __future__ import annotations
 
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from marklymem.evolver.db import build_engine, build_sessionmaker
@@ -25,14 +28,15 @@ from .models import (
     AddBatchRequest,
     AddRequest,
     AddResponse,
-    ClearRequest,
     ClearResponse,
     MemoryHit,
     RetrieveRequest,
     RetrieveResponse,
-    StatsRequest,
+    ScopedRequest,
     StatsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -69,7 +73,7 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.mgr = mgr
     print(
-        f"[EvolverAPI] ready — db={settings.DATABASE_URL!r} "
+        f"[marklymem] ready — routes=/api/ db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
         f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True"
     )
@@ -107,6 +111,34 @@ else:
     )
 
 
+def _set_request_context(request: Request, req: ScopedRequest) -> None:
+    request.state.user_id = req.user_id
+    request.state.scope_id = req.scope_id
+
+
+router = APIRouter(prefix="/api")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+    req_id = uuid.uuid4().hex[:8]
+    request.state.req_id = req_id
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    user_id = getattr(request.state, "user_id", None)
+    scope_id = getattr(request.state, "scope_id", None)
+    log = logger.error if response.status_code >= 500 else logger.info
+    log(
+        "%s %s %d %.1fms req_id=%s user_id=%s scope_id=%s",
+        request.method, request.url.path, response.status_code, duration_ms,
+        req_id, user_id, scope_id,
+    )
+    return response
+
+
 def _mgr(app: FastAPI) -> MemoryManager:
     return app.state.mgr
 
@@ -116,18 +148,16 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/memory/add", response_model=AddResponse)
-async def memory_add(req: AddRequest) -> AddResponse:
+@router.post("/memory/add", response_model=AddResponse)
+async def memory_add(req: AddRequest, request: Request) -> AddResponse:
     """Ingest a single dialogue turn into the caller's scope."""
-    try:
-        result = await _mgr(app).ingest_session_turns(
-            req.session_id,
-            [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
-            user_id=req.user_id,
-            scope_id=req.scope_id,
-        )
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    _set_request_context(request, req)
+    result = await _mgr(app).ingest_session_turns(
+        req.session_id,
+        [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+    )
     return AddResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
@@ -137,18 +167,16 @@ async def memory_add(req: AddRequest) -> AddResponse:
     )
 
 
-@app.post("/memory/add_batch", response_model=AddResponse)
-async def memory_add_batch(req: AddBatchRequest) -> AddResponse:
+@router.post("/memory/add_batch", response_model=AddResponse)
+async def memory_add_batch(req: AddBatchRequest, request: Request) -> AddResponse:
     """Ingest multiple dialogue turns into the caller's scope (max 50 turns)."""
-    try:
-        result = await _mgr(app).ingest_session_turns(
-            req.session_id,
-            [t.model_dump() for t in req.turns],
-            user_id=req.user_id,
-            scope_id=req.scope_id,
-        )
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    _set_request_context(request, req)
+    result = await _mgr(app).ingest_session_turns(
+        req.session_id,
+        [t.model_dump() for t in req.turns],
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+    )
     return AddResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
@@ -158,21 +186,18 @@ async def memory_add_batch(req: AddBatchRequest) -> AddResponse:
     )
 
 
-@app.post("/memory/retrieve", response_model=RetrieveResponse)
-async def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
+@router.post("/memory/retrieve", response_model=RetrieveResponse)
+async def memory_retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
     """Hybrid (semantic + lexical) search within the caller's scope."""
-    try:
-        query = MemoryQuery(
-            user_id=req.user_id,
-            scope_id=req.scope_id,
-            session_id=req.session_id,
-            query_text=req.query,
-            top_k=req.top_k,
-        )
-        hits = await _mgr(app).retriever.retrieve(query)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
+    _set_request_context(request, req)
+    query = MemoryQuery(
+        user_id=req.user_id,
+        scope_id=req.scope_id,
+        session_id=req.session_id,
+        query_text=req.query,
+        top_k=req.top_k,
+    )
+    hits = await _mgr(app).retriever.retrieve(query)
     results = [
         MemoryHit(
             memory_id=h.unit.memory_id,
@@ -196,13 +221,11 @@ async def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
     )
 
 
-@app.post("/memory/clear", response_model=ClearResponse)
-async def memory_clear(req: ClearRequest) -> ClearResponse:
+@router.post("/memory/clear", response_model=ClearResponse)
+async def memory_clear(req: ScopedRequest, request: Request) -> ClearResponse:
     """Soft-clear the caller's scope (archive all non-pinned active memories)."""
-    try:
-        result = await _mgr(app).archive_scope(req.user_id, req.scope_id)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    _set_request_context(request, req)
+    result = await _mgr(app).archive_scope(req.user_id, req.scope_id)
     return ClearResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
@@ -212,13 +235,11 @@ async def memory_clear(req: ClearRequest) -> ClearResponse:
     )
 
 
-@app.post("/memory/stats", response_model=StatsResponse)
-async def memory_stats(req: StatsRequest) -> StatsResponse:
+@router.post("/memory/stats", response_model=StatsResponse)
+async def memory_stats(req: ScopedRequest, request: Request) -> StatsResponse:
     """Return memory counts for the caller's scope."""
-    try:
-        stats = await _mgr(app).get_scope_stats(req.user_id, req.scope_id)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    _set_request_context(request, req)
+    stats = await _mgr(app).get_scope_stats(req.user_id, req.scope_id)
     return StatsResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
@@ -229,3 +250,6 @@ async def memory_stats(req: StatsRequest) -> StatsResponse:
         type_count=int(stats.get("type_count", 0)),
         dominant_type=stats.get("dominant_type", ""),
     )
+
+
+app.include_router(router)
