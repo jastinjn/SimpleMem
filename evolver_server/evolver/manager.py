@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -154,15 +155,11 @@ class MemoryManager:
         scope = scope_id or self.scope_id
         units: list[MemoryUnit] = []
 
-        # Multi-turn context accumulator for cross-turn extraction.
-        context = _MultiTurnContext()
-
-        for idx, turn in enumerate(turns, start=1):
+        async def _extract_turn(idx: int, turn: dict) -> list[MemoryUnit]:
             prompt_text = str(turn.get("prompt_text", "") or "").strip()
             response_text = str(turn.get("response_text", "") or "").strip()
             if not prompt_text and not response_text:
-                continue
-
+                return []
             extracted = await _extract_memory_units_for_turn(
                 user_id=uid,
                 scope_id=scope,
@@ -170,7 +167,6 @@ class MemoryManager:
                 turn_index=idx,
                 prompt_text=prompt_text,
                 response_text=response_text,
-                multi_turn_context=context,
             )
             if extracted:
                 logger.info(
@@ -178,8 +174,13 @@ class MemoryManager:
                     idx, len(turns), len(extracted),
                     ", ".join(u.memory_type.value for u in extracted),
                 )
+            return extracted
+
+        results = await asyncio.gather(
+            *(_extract_turn(idx, turn) for idx, turn in enumerate(turns, start=1))
+        )
+        for extracted in results:
             units.extend(extracted)
-            await context.add_turn(prompt_text, response_text, idx)
 
         # Stamp user_id on all extracted units.
         for u in units:
@@ -4476,60 +4477,6 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
     return MemoryType.EPISODIC
 
 
-class _MultiTurnContext:
-    """Accumulates context across turns to enable cross-turn extraction."""
-
-    def __init__(self, window: int = 3):
-        self.window = window
-        self._turns: list[dict] = []
-
-    async def add_turn(self, prompt_text: str, response_text: str, turn_index: int) -> None:
-        self._turns.append({
-            "prompt": prompt_text,
-            "response": response_text,
-            "index": turn_index,
-        })
-        if len(self._turns) > self.window:
-            self._turns = self._turns[-self.window:]
-
-    async def get_recent_context(self) -> str:
-        """Return concatenated recent turn text for context-aware extraction."""
-        parts = []
-        for t in self._turns:
-            if t["prompt"]:
-                parts.append(t["prompt"])
-            if t["response"]:
-                parts.append(t["response"])
-        return " ".join(parts)
-
-    async def get_accumulated_entities(self) -> list[str]:
-        """Return entities mentioned across recent turns for enrichment."""
-        all_entities: list[str] = []
-        seen: set[str] = set()
-        for t in self._turns:
-            combined = f"{t['prompt']} {t['response']}"
-            for ent in _extract_entities(combined):
-                if ent not in seen:
-                    seen.add(ent)
-                    all_entities.append(ent)
-        return all_entities[:12]
-
-    async def has_continuation_pattern(self, prompt_text: str) -> bool:
-        """Detect if the current turn continues a prior topic (e.g., pronoun references)."""
-        continuation_markers = [
-            "also", "and also", "another thing", "in addition",
-            "regarding that", "about that", "same for", "similarly",
-            "on that note", "related to that", "going back to",
-        ]
-        lower = prompt_text.lower().strip()
-        for m in continuation_markers:
-            # Check start-of-sentence: "Also, ..." or "Also ..."
-            if lower.startswith(m) and (len(lower) == len(m) or not lower[len(m)].isalpha()):
-                return True
-            # Check mid-sentence: "... also ..."
-            if f" {m} " in lower or f" {m}," in lower:
-                return True
-        return False
 
 
 async def _extract_memory_units_for_turn(
@@ -4539,31 +4486,13 @@ async def _extract_memory_units_for_turn(
     turn_index: int,
     prompt_text: str,
     response_text: str,
-    multi_turn_context: _MultiTurnContext | None = None,
 ) -> list[MemoryUnit]:
     extracted: list[MemoryUnit] = []
     text = " ".join([prompt_text, response_text]).strip()
     topics = _extract_topics(text)
     entities = _extract_entities(text)
 
-    # Enrich entities from multi-turn context when the turn is a continuation.
-    if multi_turn_context is not None and await multi_turn_context.has_continuation_pattern(prompt_text):
-        context_entities = await multi_turn_context.get_accumulated_entities()
-        seen_ent = set(entities)
-        for ent in context_entities:
-            if ent not in seen_ent and len(entities) < 12:
-                entities.append(ent)
-                seen_ent.add(ent)
-
-    # Try extraction with context-enriched text for continuation turns.
-    extraction_prompt = prompt_text
-    extraction_response = response_text
-    if multi_turn_context is not None and await multi_turn_context.has_continuation_pattern(prompt_text):
-        recent_ctx = await multi_turn_context.get_recent_context()
-        if recent_ctx:
-            extraction_prompt = f"{recent_ctx} {prompt_text}"
-
-    for fact in _extract_pattern_facts(extraction_prompt, extraction_response):
+    for fact in _extract_pattern_facts(prompt_text, response_text):
         extracted.append(
             MemoryUnit(
                 memory_id=str(uuid.uuid4()),
