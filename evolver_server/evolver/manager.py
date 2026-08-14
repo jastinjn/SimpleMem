@@ -6,18 +6,14 @@ import re
 import uuid
 from collections.abc import Callable
 
-from .config import EvolveMemConfig
 from .consolidator import MemoryConsolidator
 from .embeddings import BaseEmbedder, create_embedder
 from .llm_extractor import LLMMemoryExtractor
 from .metrics import summarize_memory_store
 from .models import MemoryQuery, MemoryStatus, MemoryType, MemoryUnit, utc_now_iso
 from .policy import MemoryPolicy
-from .policy_optimizer import MemoryPolicyOptimizer
-from .policy_store import MemoryPolicyState, MemoryPolicyStore
 from .retriever import MemoryRetriever
 from .store import MemoryStore
-from .telemetry import MemoryTelemetryStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +34,6 @@ class MemoryManager:
         auto_consolidate: bool = True,
         retrieval_mode: str = "keyword",
         use_embeddings: bool = False,
-        policy_store: MemoryPolicyStore | None = None,
-        telemetry_store: MemoryTelemetryStore | None = None,
         embedding_mode: str = "hashing",
         embedding_model: str = "all-MiniLM-L6-v2",
         embedder: BaseEmbedder | None = None,
@@ -55,8 +49,6 @@ class MemoryManager:
         self.ingestion_mode = ingestion_mode
         self.llm_extractor = llm_extractor
         self.use_embeddings = use_embeddings or retrieval_mode in {"embedding", "hybrid"}
-        self.policy_store = policy_store
-        self.telemetry_store = telemetry_store
         self.embedding_mode = embedding_mode
         self.embedding_model = embedding_model
         if embedder is not None:
@@ -65,10 +57,6 @@ class MemoryManager:
             self.embedder = create_embedder(mode=embedding_mode)
         else:
             self.embedder = None
-        self.policy_optimizer = MemoryPolicyOptimizer(
-            store=self.store,
-            telemetry_store=self.telemetry_store,
-        )
         self.retriever = MemoryRetriever(
             store=self.store,
             policy=self.policy,
@@ -79,55 +67,6 @@ class MemoryManager:
         self._retrieval_cache: dict[str, list[MemoryUnit]] = {}
         self._cache_max_size = 16
         self._event_callbacks: list[Callable] = []
-
-    @classmethod
-    def from_config(cls, cfg: EvolveMemConfig) -> "MemoryManager":
-        policy_store = MemoryPolicyStore(cfg.memory_policy_path)
-        policy_exists = policy_store.path.exists()
-        policy_state = policy_store.load()
-        telemetry_store = MemoryTelemetryStore(cfg.memory_telemetry_path)
-        if not policy_exists:
-            policy_state.max_injected_units = cfg.memory_max_injected_units
-            policy_state.max_injected_tokens = cfg.memory_max_injected_tokens
-            policy_state.retrieval_mode = cfg.memory_retrieval_mode
-            policy_store.save(policy_state, reason="bootstrap")
-        policy = MemoryPolicy.from_state(policy_state)
-        store = MemoryStore(cfg.memory_store_path)  # type: ignore[arg-type]
-        return cls(
-            store=store,
-            policy=policy,
-            scope_id=cfg.memory_scope,
-            auto_consolidate=cfg.memory_auto_consolidate,
-            retrieval_mode=policy_state.retrieval_mode or cfg.memory_retrieval_mode,
-            use_embeddings=cfg.memory_use_embeddings,
-            policy_store=policy_store,
-            telemetry_store=telemetry_store,
-            embedding_mode=getattr(cfg, "memory_embedding_mode", "hashing"),
-            embedding_model=getattr(cfg, "memory_embedding_model", "all-MiniLM-L6-v2"),
-        )
-
-    @classmethod
-    def from_config_with_policy_state(
-        cls,
-        cfg: EvolveMemConfig,
-        policy_state: MemoryPolicyState,
-    ) -> "MemoryManager":
-        policy_store = MemoryPolicyStore(cfg.memory_policy_path)
-        telemetry_store = MemoryTelemetryStore(cfg.memory_telemetry_path)
-        policy = MemoryPolicy.from_state(policy_state)
-        store = MemoryStore(cfg.memory_store_path)  # type: ignore[arg-type]
-        return cls(
-            store=store,
-            policy=policy,
-            scope_id=cfg.memory_scope,
-            auto_consolidate=cfg.memory_auto_consolidate,
-            retrieval_mode=policy_state.retrieval_mode or cfg.memory_retrieval_mode,
-            use_embeddings=cfg.memory_use_embeddings,
-            policy_store=policy_store,
-            telemetry_store=telemetry_store,
-            embedding_mode=getattr(cfg, "memory_embedding_mode", "hashing"),
-            embedding_model=getattr(cfg, "memory_embedding_model", "all-MiniLM-L6-v2"),
-        )
 
     def register_event_callback(self, callback: Callable) -> None:
         """Register a callback for memory events.
@@ -236,11 +175,6 @@ class MemoryManager:
         conflicts = await _detect_conflicts(units, self.store, uid, scope)
         if conflicts:
             logger.info("[Memory] detected %d conflicts with existing memories", len(conflicts))
-            if self.telemetry_store is not None:
-                self.telemetry_store.record(
-                    "memory_conflicts",
-                    {"scope_id": scope, "session_id": session_id, "conflicts": conflicts[:5]},
-                )
             self._notify("conflicts_detected", scope_id=scope, count=len(conflicts))
 
         if self.embedder is not None:
@@ -269,31 +203,7 @@ class MemoryManager:
         consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:
             consolidation_result = await self.consolidator.consolidate(uid, scope)
-            if self.telemetry_store is not None and consolidation_result:
-                self.telemetry_store.record(
-                    "memory_consolidation",
-                    {
-                        "scope_id": scope,
-                        "session_id": session_id,
-                        "superseded": consolidation_result.get("superseded", 0),
-                        "decayed": consolidation_result.get("decayed", 0),
-                        "reinforced": consolidation_result.get("reinforced", 0),
-                    },
-                )
         stats = await summarize_memory_store(self.store, uid, scope)
-        await self._refresh_policy(scope)
-        if self.telemetry_store is not None:
-            self.telemetry_store.record(
-                "memory_ingest",
-                {
-                    "scope_id": scope,
-                    "session_id": session_id,
-                    "added": added,
-                    "active": stats.get("active", 0),
-                    "dominant_type": stats.get("dominant_type", ""),
-                    "active_by_type": stats.get("active_by_type", {}),
-                },
-            )
         logger.info(
             "[Memory] ingested %d memory units from session=%s scope=%s active=%d dominant_type=%s",
             added,
@@ -382,30 +292,6 @@ class MemoryManager:
                 "[Memory] retrieve scope=%s mode=%s → 0 hits, query=%s",
                 effective_scope, self.retrieval_mode, task_description[:80],
             )
-        if self.telemetry_store is not None:
-            rendered = await self.render_for_prompt(units)
-            # Type distribution of retrieved units.
-            type_counts: dict[str, int] = {}
-            for u in units:
-                type_counts[u.memory_type.value] = type_counts.get(u.memory_type.value, 0) + 1
-            self.telemetry_store.record(
-                "memory_retrieval",
-                {
-                    "scope_id": query.scope_id,
-                    "query_length": len(task_description),
-                    "retrieved_count": len(units),
-                    "injected_tokens": estimate_tokens(rendered),
-                    "types_retrieved": list({u.memory_type.value for u in units}),
-                    "type_distribution": type_counts,
-                    "avg_importance": round(
-                        sum(u.importance for u in units) / max(len(units), 1), 4
-                    ),
-                    "avg_reinforcement": round(
-                        sum(u.reinforcement_score for u in units) / max(len(units), 1), 4
-                    ),
-                    "retrieval_mode": self.retrieval_mode,
-                },
-            )
         # Cache results for repeated queries within the same session.
         if len(self._retrieval_cache) >= self._cache_max_size:
             # Evict oldest entry.
@@ -457,11 +343,6 @@ class MemoryManager:
     async def get_scope_stats(self, user_id: str | None = None, scope_id: str | None = None) -> dict:
         return await summarize_memory_store(self.store, user_id or self.user_id, scope_id)
 
-    async def get_policy_state(self) -> dict:
-        if self.policy_store is None:
-            return {}
-        return self.policy_store.load().__dict__
-
     async def get_access_patterns(self, scope_id: str | None = None, limit: int = 5) -> dict:
         """Return access pattern insights for the given scope."""
         scope = scope_id or self.scope_id
@@ -491,23 +372,6 @@ class MemoryManager:
         scope = scope_id or self.scope_id
         stats = await self.get_scope_stats(scope)
         access = await self.get_access_patterns(scope)
-        policy = await self.get_policy_state()
-
-        # Analyze retrieval telemetry for recent performance.
-        telemetry = await self.get_recent_telemetry(limit=50)
-        retrieval_events = [
-            e for e in telemetry if e.get("event_type") == "memory_retrieval"
-        ]
-        zero_retrievals = sum(
-            1 for e in retrieval_events
-            if e.get("payload", {}).get("retrieved_count", 0) == 0
-        )
-        avg_retrieved = 0.0
-        if retrieval_events:
-            avg_retrieved = sum(
-                e.get("payload", {}).get("retrieved_count", 0)
-                for e in retrieval_events
-            ) / float(len(retrieval_events))
 
         # Memory age distribution.
         from datetime import datetime, timezone
@@ -556,8 +420,6 @@ class MemoryManager:
             issues.append("no active memories in store")
         if access.get("never_accessed", 0) > stats.get("active", 1) * 0.8:
             issues.append("over 80% of memories have never been accessed")
-        if retrieval_events and zero_retrievals > len(retrieval_events) * 0.5:
-            issues.append("over 50% of retrievals returned zero results")
         if ttl_expiring_soon > 0:
             issues.append(f"{ttl_expiring_soon} memories expiring within 24 hours")
 
@@ -573,11 +435,6 @@ class MemoryManager:
                 "avg_access_count": access.get("avg_access_count", 0.0),
                 "never_accessed": access.get("never_accessed", 0),
             },
-            "retrieval": {
-                "recent_events": len(retrieval_events),
-                "avg_retrieved": round(avg_retrieved, 2),
-                "zero_retrieval_count": zero_retrievals,
-            },
             "cache": {
                 "hits": self._cache_hits,
                 "misses": self._cache_misses,
@@ -588,9 +445,9 @@ class MemoryManager:
                 "expiring_within_24h": ttl_expiring_soon,
             },
             "policy": {
-                "retrieval_mode": policy.get("retrieval_mode", ""),
-                "max_injected_units": policy.get("max_injected_units", 0),
-                "max_injected_tokens": policy.get("max_injected_tokens", 0),
+                "retrieval_mode": self.retrieval_mode,
+                "max_injected_units": self.policy.max_injected_units,
+                "max_injected_tokens": self.policy.max_injected_tokens,
             },
             "issues": issues,
         }
@@ -948,11 +805,6 @@ class MemoryManager:
         await self.store.record_feedback(memory_id, helpful)
         await self.clear_cache()
         self._notify("feedback", memory_id=memory_id, helpful=helpful)
-        if self.telemetry_store is not None:
-            self.telemetry_store.record(
-                "memory_feedback",
-                {"memory_id": memory_id, "helpful": helpful},
-            )
 
     async def analyze_feedback_patterns(self, scope_id: str | None = None) -> dict:
         """Analyze retrieval feedback patterns for a scope.
@@ -1080,11 +932,6 @@ class MemoryManager:
         if count:
             await self.clear_cache()
         return count
-
-    async def get_recent_telemetry(self, limit: int = 20) -> list[dict]:
-        if self.telemetry_store is None:
-            return []
-        return self.telemetry_store.read_recent(limit=limit)
 
     async def apply_retention_policy(
         self,
@@ -4306,44 +4153,6 @@ class MemoryManager:
             kept.append(unit)
             used += cost
         return kept
-
-    async def _refresh_policy(self, scope_id: str) -> None:
-        if self.policy_store is None:
-            return
-        current_state = self.policy_store.load()
-        proposed = await self.policy_optimizer.propose(self.user_id, scope_id, current_state)
-        if proposed == current_state:
-            return
-        self.policy_store.save(proposed, reason="auto_optimize")
-        self.policy = MemoryPolicy.from_state(proposed)
-        self.retrieval_mode = proposed.retrieval_mode
-        self.use_embeddings = self.use_embeddings or proposed.retrieval_mode in {"embedding", "hybrid"}
-        if self.use_embeddings and self.embedder is None:
-            self.embedder = create_embedder(mode=self.embedding_mode)
-        self.retriever = MemoryRetriever(
-            store=self.store,
-            policy=self.policy,
-            retrieval_mode=self.retrieval_mode,
-            embedder=self.embedder,
-        )
-        logger.info(
-            "[MemoryPolicy] scope=%s mode=%s units=%d tokens=%d",
-            scope_id,
-            proposed.retrieval_mode,
-            proposed.max_injected_units,
-            proposed.max_injected_tokens,
-        )
-        if self.telemetry_store is not None:
-            self.telemetry_store.record(
-                "policy_update",
-                {
-                    "scope_id": scope_id,
-                    "retrieval_mode": proposed.retrieval_mode,
-                    "max_injected_units": proposed.max_injected_units,
-                    "max_injected_tokens": proposed.max_injected_tokens,
-                    "notes": proposed.notes[-3:],
-                },
-            )
 
 
 def _extract_topics(prompt_text: str) -> list[str]:

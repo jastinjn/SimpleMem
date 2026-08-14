@@ -44,8 +44,6 @@ def _manager(
         scope_id=scope_id,
         auto_consolidate=auto_consolidate,
         retrieval_mode=retrieval_mode,
-        policy_store=None,
-        telemetry_store=None,
         embedder=embedder,
         ingestion_mode=ingestion_mode,
         llm_extractor=llm_extractor,
@@ -314,7 +312,7 @@ class TestRetrieveForPrompt:
         policy = MemoryPolicy(recency_weight=0.0, max_injected_units=10, max_injected_tokens=5)
         mgr = MemoryManager(
             store=store, policy=policy, user_id=UID, scope_id="test",
-            auto_consolidate=False, policy_store=None, telemetry_store=None,
+            auto_consolidate=False,
         )
         await self._ingest(mgr)
         units = await mgr.retrieve_for_prompt("PostgreSQL database")

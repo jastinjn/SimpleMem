@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .policy_store import MemoryPolicyState
-
 
 @dataclass
 class MemoryPolicy:
@@ -23,21 +21,6 @@ class MemoryPolicy:
             "procedural_observation": 0.9,
         }
     )
-
-    @classmethod
-    def from_state(cls, state: MemoryPolicyState) -> "MemoryPolicy":
-        kwargs: dict = dict(
-            max_injected_units=state.max_injected_units,
-            max_injected_tokens=state.max_injected_tokens,
-            recent_bonus_hours=state.recent_bonus_hours,
-            keyword_weight=state.keyword_weight,
-            metadata_weight=state.metadata_weight,
-            importance_weight=state.importance_weight,
-            recency_weight=state.recency_weight,
-        )
-        if state.type_boosts:
-            kwargs["type_boosts"] = dict(state.type_boosts)
-        return cls(**kwargs)
 
     @classmethod
     def from_profile(cls, profile: str) -> "MemoryPolicy":
