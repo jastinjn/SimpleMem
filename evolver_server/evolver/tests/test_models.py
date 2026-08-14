@@ -31,7 +31,6 @@ class TestMemoryUnit:
         assert u.access_count == 0
         assert u.reinforcement_score == 0.0
         assert u.status == MemoryStatus.ACTIVE
-        assert u.summary == ""
         assert u.superseded_by == ""
         assert u.last_accessed_at == ""
         assert u.expires_at == ""
@@ -93,7 +92,6 @@ class TestMemoryTypeEnum:
         assert MemoryType.SEMANTIC.value == "semantic"
         assert MemoryType.PREFERENCE.value == "preference"
         assert MemoryType.PROJECT_STATE.value == "project_state"
-        assert MemoryType.WORKING_SUMMARY.value == "working_summary"
         assert MemoryType.PROCEDURAL_OBSERVATION.value == "procedural_observation"
 
 

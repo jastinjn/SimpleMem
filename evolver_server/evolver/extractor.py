@@ -324,7 +324,6 @@ class MemoryExtractor:
                 scope_id=scope_id,
                 memory_type=mtype,
                 content=content,
-                summary=content[:100],
                 entities=mem.get("persons", []) + mem.get("entities", []),
                 topics=mem.get("keywords", []),
                 importance=0.5,

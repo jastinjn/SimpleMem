@@ -292,10 +292,6 @@ class LLMMemoryExtractor:
                     scope_id=scope_id,
                     memory_type=mtype,
                     content=content,
-                    # summary left blank: the restatement is already a single
-                    # self-contained sentence, so a separate summary would just
-                    # duplicate the content (and double-weight it in retrieval).
-                    summary="",
                     source_session_id=session_id,
                     source_turn_start=start,
                     source_turn_end=end,

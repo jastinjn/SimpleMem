@@ -186,7 +186,6 @@ async def test_field_mapping_from_entry():
     assert u.source_session_id == "sess-9"
     assert (u.source_turn_start, u.source_turn_end) == (1, 1)
     assert u.content == "Alice scored Level 4 on the persuasive essay task"
-    assert u.summary == ""
 
 
 @pytest.mark.parametrize(
@@ -204,13 +203,11 @@ async def test_all_assignable_types_map_to_memory_type(atype, expected):
     assert units[0].memory_type == expected
 
 
-async def test_content_kept_full_and_summary_blank():
+async def test_content_kept_full():
     long_text = ("word " * 700).strip()  # 700 words, ~3499 chars
     ex = LLMMemoryExtractor(_canned([_entry(text=long_text)]))
     units = await ex.extract_session(_turns(1), "u", "s", "sess")
-    # content is stored verbatim (no truncation); summary is intentionally blank.
     assert units[0].content == long_text
-    assert units[0].summary == ""
 
 
 async def test_short_restatements_are_dropped():

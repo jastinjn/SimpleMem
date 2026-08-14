@@ -177,7 +177,6 @@ async def memory_retrieve(req: RetrieveRequest) -> RetrieveResponse:
         MemoryHit(
             memory_id=h.unit.memory_id,
             content=h.unit.content,
-            summary=h.unit.summary,
             memory_type=h.unit.memory_type.value,
             importance=h.unit.importance,
             score=round(float(h.score), 4),

@@ -29,7 +29,6 @@ class MemoryPolicyOptimizer:
 
         active = int(stats.get("active", 0))
         dominant = str(stats.get("dominant_type", "") or "")
-        density = float(stats.get("memory_density", 0.0) or 0.0)
         active_by_type = stats.get("active_by_type", {})
 
         # Low-volume safety: don't tune weights before having enough data.
@@ -49,10 +48,6 @@ class MemoryPolicyOptimizer:
             notes.append("Raised injection budget because active memory volume is high.")
 
         # Type-distribution-based weight tuning.
-        if dominant == "working_summary" and density > 0.6:
-            proposed.recency_weight = min(0.6, current.recency_weight + 0.1)
-            notes.append("Raised recency weight because working summaries dominate the active memory pool.")
-
         if dominant == "preference":
             proposed.metadata_weight = min(0.8, current.metadata_weight + 0.05)
             notes.append("Raised metadata weight because preference memories dominate and benefit from tighter matching.")
@@ -153,7 +148,7 @@ class MemoryPolicyOptimizer:
                 for t in e["payload"].get("types_retrieved", []):
                     retrieved_types.add(t)
             pool_types = set(active_by_type.keys())
-            never_retrieved = pool_types - retrieved_types - {"working_summary"}
+            never_retrieved = pool_types - retrieved_types
             if never_retrieved and len(pool_types) >= 3:
                 # Bump metadata weight slightly to help underrepresented types surface.
                 new_meta = min(0.8, current.metadata_weight + 0.05)

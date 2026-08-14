@@ -16,7 +16,6 @@ class MemoryPolicy:
     recency_weight: float = 0.3
     type_boosts: dict[str, float] = field(
         default_factory=lambda: {
-            "working_summary": 1.2,
             "project_state": 1.1,
             "preference": 1.0,
             "semantic": 1.0,

@@ -79,23 +79,6 @@ class TestIngestSessionTurns:
         added = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         assert added > 0
 
-    async def test_working_summary_always_appended(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        active = await store.list_active(UID, "test")
-        ws_units = [u for u in active if u.memory_type == MemoryType.WORKING_SUMMARY]
-        assert len(ws_units) == 1
-        assert ws_units[0].importance == pytest.approx(0.9)
-
-    async def test_working_summary_has_deterministic_id(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        ws_units = [u for u in await store.list_active(UID, "test")
-                    if u.memory_type == MemoryType.WORKING_SUMMARY]
-        assert ws_units[0].memory_id.startswith("00000000-")
-
     async def test_empty_turns_produces_no_units(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store)
@@ -122,57 +105,38 @@ class TestIngestSessionTurns:
     async def test_auto_consolidate_false_does_not_consolidate(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store, auto_consolidate=False)
-        ws1 = _make_unit(
-            memory_id="ws-pre-001", scope_id="test",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Old working summary content here",
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        ws2 = _make_unit(
-            memory_id="ws-pre-002", scope_id="test",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="New working summary content here",
-            updated_at="2025-01-01T00:00:02+00:00",
-        )
-        await store.add_memories([ws1, ws2])
+        dup1 = _make_unit(memory_id="dup-001", scope_id="test", content="Duplicate content for consolidation test")
+        dup2 = _make_unit(memory_id="dup-002", scope_id="test", content="Duplicate content for consolidation test")
+        await store.add_memories([dup1, dup2])
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        active_ws = [u for u in await store.list_active(UID, "test")
-                     if u.memory_type == MemoryType.WORKING_SUMMARY]
-        ws_ids = {u.memory_id for u in active_ws}
-        assert "ws-pre-001" in ws_ids
-        assert "ws-pre-002" in ws_ids
+        active_ids = {u.memory_id for u in await store.list_active(UID, "test")}
+        assert "dup-001" in active_ids
+        assert "dup-002" in active_ids
 
     async def test_auto_consolidate_true_consolidates(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store, auto_consolidate=True)
-        ws1 = _make_unit(
-            memory_id="ws-pre-001", scope_id="test",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Old working summary content here",
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([ws1])
+        dup1 = _make_unit(memory_id="dup-001", scope_id="test", content="Duplicate content for consolidation test")
+        dup2 = _make_unit(memory_id="dup-002", scope_id="test", content="Duplicate content for consolidation test")
+        await store.add_memories([dup1, dup2])
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        active_ws = [u for u in await store.list_active(UID, "test")
-                     if u.memory_type == MemoryType.WORKING_SUMMARY]
-        assert len(active_ws) == 1
+        active_ids = {u.memory_id for u in await store.list_active(UID, "test")}
+        assert not ("dup-001" in active_ids and "dup-002" in active_ids)
 
     async def test_embedder_computes_embeddings(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         mgr = _manager(store, embedder=embedder)
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         units = await store.list_active(UID, "test")
-        non_ws = [u for u in units if u.memory_type != MemoryType.WORKING_SUMMARY]
-        assert all(len(u.embedding) == 64 for u in non_ws)
+        assert all(len(u.embedding) == 1024 for u in units)
 
     async def test_no_embedder_produces_empty_embeddings(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store, embedder=None)
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         units = await store.list_active(UID, "test")
-        non_ws = [u for u in units if u.memory_type != MemoryType.WORKING_SUMMARY]
-        assert all(u.embedding == [] for u in non_ws)
+        assert all(u.embedding == [] for u in units)
 
     async def test_custom_scope_id_used(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
@@ -210,19 +174,21 @@ class TestIngestSessionTurns:
 
     async def test_openai_embedder_called_during_ingestion(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
 
-        # Use 64 dimensions to match the test DB schema (vector(64))
-        DIM = 64
+        DIM = 1024
         fake_emb = MagicMock()
         fake_emb.embedding = [0.1] * DIM
         fake_emb.index = 0
         fake_response = MagicMock()
         fake_response.data = [fake_emb]
-        mock_client = MagicMock()
-        mock_client.embeddings.create.return_value = fake_response
 
-        monkeypatch.setattr("openai.OpenAI", MagicMock(return_value=mock_client))
+        mock_sync_client = MagicMock()
+        mock_async_client = MagicMock()
+        mock_async_client.embeddings.create = AsyncMock(return_value=fake_response)
+
+        monkeypatch.setattr("openai.OpenAI", MagicMock(return_value=mock_sync_client))
+        monkeypatch.setattr("openai.AsyncOpenAI", MagicMock(return_value=mock_async_client))
         fake_settings = MagicMock()
         fake_settings.OPENAI_API_KEY = "sk-test"
         fake_settings.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
@@ -232,10 +198,9 @@ class TestIngestSessionTurns:
         mgr = _manager(store, embedder=embedder)
         await mgr.ingest_session_turns("sess-openai", SAMPLE_TURNS)
 
-        assert mock_client.embeddings.create.called
+        assert mock_async_client.embeddings.create.called
         active = await store.list_active(UID, "test")
-        non_ws = [u for u in active if u.memory_type != MemoryType.WORKING_SUMMARY]
-        assert all(len(u.embedding) == DIM for u in non_ws if u.embedding)
+        assert all(len(u.embedding) == DIM for u in active if u.embedding)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +216,6 @@ class TestIngestSessionTurnsLLMMode:
             scope_id="test",
             memory_type=MemoryType.SEMANTIC,
             content="A fact extracted by the LLM ingestion path",
-            summary="",
             updated_at="2025-01-01T00:00:01+00:00",
         )
         llm_extractor = AsyncMock()

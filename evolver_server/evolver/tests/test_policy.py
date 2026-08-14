@@ -25,7 +25,6 @@ class TestMemoryPolicyDefaults:
 
     def test_default_type_boosts(self):
         p = MemoryPolicy()
-        assert p.type_boosts["working_summary"] == pytest.approx(1.2)
         assert p.type_boosts["project_state"] == pytest.approx(1.1)
         assert p.type_boosts["preference"] == pytest.approx(1.0)
         assert p.type_boosts["semantic"] == pytest.approx(1.0)

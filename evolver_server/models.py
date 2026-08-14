@@ -68,7 +68,6 @@ class AddResponse(BaseModel):
 class MemoryHit(BaseModel):
     memory_id: str
     content: str
-    summary: str
     memory_type: str
     importance: float
     score: float

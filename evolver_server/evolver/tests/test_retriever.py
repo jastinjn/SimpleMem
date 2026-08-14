@@ -69,7 +69,7 @@ class TestKeywordRetrieval:
 
 class TestEmbeddingRetrieval:
     async def test_similar_content_returned(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         units = create_test_units()
         for u in units:
             u.embedding = embedder.encode(u.content)
@@ -80,7 +80,7 @@ class TestEmbeddingRetrieval:
         assert any(h.unit.memory_id == "unit-001" for h in hits)
 
     async def test_empty_embedding_units_skipped(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         u = _make_unit(memory_id="no-emb-001", scope_id="emb")
         u.embedding = []
         u2 = _make_unit(
@@ -103,7 +103,7 @@ class TestEmbeddingRetrieval:
         assert hits == []
 
     async def test_score_formula(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         policy = MemoryPolicy(
             importance_weight=0.5,
             recency_weight=0.0,
@@ -135,7 +135,7 @@ class TestEmbeddingRetrieval:
 
 class TestHybridRetrieval:
     async def test_returns_hits(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         units = create_test_units()
         for u in units:
             u.embedding = embedder.encode(u.content)
@@ -145,7 +145,7 @@ class TestHybridRetrieval:
         assert len(hits) > 0
 
     async def test_include_types_filters(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         units = create_test_units()
         for u in units:
             u.embedding = embedder.encode(u.content)
@@ -165,14 +165,14 @@ class TestHybridRetrieval:
 class TestAutoMode:
     async def test_short_query_uses_keyword(self, store):
         await store.add_memories(create_test_units())
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
         q = MemoryQuery(user_id=UID, scope_id="test", query_text="db key")
         mode = r._auto_select_mode(q)
         assert mode == "keyword"
 
     async def test_long_query_with_embedder_uses_hybrid(self, store):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
         q = MemoryQuery(user_id=UID, scope_id="test", query_text="the project uses PostgreSQL database backend")
         mode = r._auto_select_mode(q)
@@ -223,7 +223,7 @@ class TestTagBoost:
 
 class TestRecencyBonus:
     async def test_recent_unit_gets_bonus(self, store, frozen_retriever_clock):
-        embedder = HashingEmbedder(dimensions=64)
+        embedder = HashingEmbedder(dimensions=1024)
         recent_ts = "2025-02-14T23:00:00+00:00"
         old_ts = "2024-01-01T00:00:00+00:00"
 

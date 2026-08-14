@@ -4,14 +4,14 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from .models import MemoryType, MemoryUnit, utc_now_iso
+from .models import MemoryUnit, utc_now_iso
 from .store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryConsolidator:
-    """Consolidation for duplicates, near-duplicates, stale summaries, and decay."""
+    """Consolidation for duplicates, near-duplicates, and decay."""
 
     def __init__(
         self,
@@ -34,19 +34,10 @@ class MemoryConsolidator:
         now = utc_now_iso()
         superseded = 0
 
-        # Keep only the newest working summary active.
-        working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]
-        working.sort(key=lambda u: u.updated_at, reverse=True)
-        for stale in working[1:]:
-            await self.store.supersede(stale.memory_id, working[0].memory_id, updated_at=now)
-            superseded += 1
-
         # Exact duplicate content deduplication.
         seen: dict[tuple[str, str], str] = {}
         remaining: list[MemoryUnit] = []
         for unit in units:
-            if unit.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             key = (unit.memory_type.value, unit.content.strip())
             if key not in seen:
                 seen[key] = unit.memory_id
@@ -79,18 +70,11 @@ class MemoryConsolidator:
         """
         units = await self.store.list_active(user_id, scope_id, limit=2000)
 
-        # Stale working summaries.
-        working = [u for u in units if u.memory_type == MemoryType.WORKING_SUMMARY]
-        working.sort(key=lambda u: u.updated_at, reverse=True)
-        stale_summaries = len(working) - 1 if len(working) > 1 else 0
-
         # Exact duplicates.
         seen: dict[tuple[str, str], str] = {}
         exact_dupes = 0
         remaining: list[MemoryUnit] = []
         for unit in units:
-            if unit.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             key = (unit.memory_type.value, unit.content.strip())
             if key in seen:
                 exact_dupes += 1
@@ -105,11 +89,10 @@ class MemoryConsolidator:
         decay_candidates = self._count_decay_candidates(units)
 
         return {
-            "stale_summaries": stale_summaries,
             "exact_duplicates": exact_dupes,
             "near_duplicates": near_dupes,
             "decay_candidates": decay_candidates,
-            "total_actions": stale_summaries + exact_dupes + near_dupes + decay_candidates,
+            "total_actions": exact_dupes + near_dupes + decay_candidates,
         }
 
     def _count_near_duplicates(self, units: list[MemoryUnit]) -> int:
@@ -147,8 +130,6 @@ class MemoryConsolidator:
         now = datetime.now(timezone.utc)
         count = 0
         for unit in units:
-            if unit.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             if unit.importance <= self.min_importance:
                 continue
             reference = unit.last_accessed_at or unit.updated_at
@@ -251,8 +232,6 @@ class MemoryConsolidator:
         now = datetime.now(timezone.utc)
         decayed = 0
         for unit in units:
-            if unit.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             if unit.importance <= self.min_importance:
                 continue
 

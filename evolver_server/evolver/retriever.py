@@ -99,7 +99,7 @@ class MemoryRetriever:
         unit_content_terms: list[set[str]] = []
         unit_metadata_terms: list[set[str]] = []
         for unit in units:
-            content = set(_tokenize(" ".join([unit.summary, unit.content])))
+            content = set(_tokenize(unit.content))
             metadata = set(_tokenize(" ".join(unit.topics + unit.entities)))
             unit_content_terms.append(content)
             unit_metadata_terms.append(metadata)

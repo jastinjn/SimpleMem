@@ -14,7 +14,6 @@ class MemoryType(str, Enum):
     SEMANTIC = "semantic"
     PREFERENCE = "preference"
     PROJECT_STATE = "project_state"
-    WORKING_SUMMARY = "working_summary"
     PROCEDURAL_OBSERVATION = "procedural_observation"
 
 
@@ -31,7 +30,6 @@ class MemoryUnit:
     memory_type: MemoryType
     content: str
     scope_id: str | None = None
-    summary: str = ""
     source_session_id: str = ""
     source_turn_start: int = 0
     source_turn_end: int = 0

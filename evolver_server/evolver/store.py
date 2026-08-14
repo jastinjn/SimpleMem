@@ -71,7 +71,6 @@ class MemoryStore:
                     scope_id=unit.scope_id,
                     memory_type=unit.memory_type.value,
                     content=unit.content,
-                    summary=unit.summary,
                     source_session_id=unit.source_session_id,
                     source_turn_start=unit.source_turn_start,
                     source_turn_end=unit.source_turn_end,
@@ -123,15 +122,13 @@ class MemoryStore:
         now_iso = _utc_now_iso()
         return [u for u in units if not u.expires_at or u.expires_at > now_iso]
 
-    async def update_content(self, memory_id: str, content: str, summary: str = "") -> bool:
+    async def update_content(self, memory_id: str, content: str) -> bool:
         async with self._sm() as s:
             row = await s.get(Memory, memory_id)
             if row is None:
                 return False
             row.content = content
             row.updated_at = _utc_now_iso()
-            if summary:
-                row.summary = summary
             await s.commit()
         return True
 
@@ -305,7 +302,7 @@ class MemoryStore:
         haystacks: list[str] = []
         for unit in units:
             haystack = " ".join([
-                unit.content.lower(), unit.summary.lower(),
+                unit.content.lower(),
                 " ".join(x.lower() for x in unit.entities),
                 " ".join(x.lower() for x in unit.topics),
             ])
@@ -366,7 +363,7 @@ class MemoryStore:
         keyword_lower = keyword.lower() if keyword else ""
         tag_lower = tag.lower().strip() if tag else ""
         for u in units:
-            if keyword_lower and keyword_lower not in u.content.lower() and keyword_lower not in u.summary.lower():
+            if keyword_lower and keyword_lower not in u.content.lower():
                 continue
             if memory_type and u.memory_type.value != memory_type:
                 continue
@@ -607,7 +604,7 @@ class MemoryStore:
             result.append({
                 "memory_id": u.memory_id, "scope_id": u.scope_id,
                 "memory_type": u.memory_type.value, "content": u.content,
-                "summary": u.summary, "source_session_id": u.source_session_id,
+                "source_session_id": u.source_session_id,
                 "source_turn_start": u.source_turn_start, "source_turn_end": u.source_turn_end,
                 "entities": u.entities, "topics": u.topics, "importance": u.importance,
                 "confidence": u.confidence, "access_count": u.access_count,
@@ -641,7 +638,6 @@ class MemoryStore:
                 scope_id=scope,
                 memory_type=mt,
                 content=item.get("content", ""),
-                summary=item.get("summary", ""),
                 source_session_id=item.get("source_session_id", ""),
                 source_turn_start=int(item.get("source_turn_start", 0)),
                 source_turn_end=int(item.get("source_turn_end", 0)),
@@ -696,7 +692,7 @@ class MemoryStore:
         shared = MemoryUnit(
             memory_id=new_id, user_id=source.user_id, scope_id=target_scope_id,
             memory_type=source.memory_type, content=source.content,
-            summary=source.summary, source_session_id=source.source_session_id,
+            source_session_id=source.source_session_id,
             source_turn_start=source.source_turn_start, source_turn_end=source.source_turn_end,
             entities=list(source.entities), topics=list(source.topics),
             importance=source.importance, confidence=max(source.confidence - 0.05, 0.5),
@@ -712,7 +708,7 @@ class MemoryStore:
     # Merge / similarity
     # ------------------------------------------------------------------
 
-    async def merge_memories(self, id_a: str, id_b: str, merged_content: str, merged_summary: str = "") -> str | None:
+    async def merge_memories(self, id_a: str, id_b: str, merged_content: str) -> str | None:
         import uuid as _uuid
         a = await self.get_by_id(id_a)
         b = await self.get_by_id(id_b)
@@ -725,7 +721,6 @@ class MemoryStore:
         merged = MemoryUnit(
             memory_id=new_id, user_id=a.user_id, scope_id=a.scope_id, memory_type=a.memory_type,
             content=merged_content,
-            summary=merged_summary or f"Merged from {id_a[:8]} and {id_b[:8]}",
             source_session_id=a.source_session_id,
             source_turn_start=min(a.source_turn_start, b.source_turn_start),
             source_turn_end=max(a.source_turn_end, b.source_turn_end),

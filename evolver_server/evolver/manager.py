@@ -159,7 +159,7 @@ class MemoryManager:
 
         Branches on the manager's ``ingestion_mode``: ``"llm"`` sends windows of the
         session to an LLM via ``self.llm_extractor``; ``"pattern"`` (default) uses
-        per-turn regex/keyword extraction. Everything after (working summary, dedup,
+        per-turn regex/keyword extraction. Everything after (dedup,
         conflict detection, embedding, store, consolidation, telemetry) is shared.
         """
         uid = user_id or self.user_id
@@ -206,23 +206,6 @@ class MemoryManager:
         for u in units:
             u.user_id = uid
 
-        if turns:
-            units.append(
-                MemoryUnit(
-                    memory_id=str(uuid.uuid4()),
-                    user_id=uid,
-                    scope_id=scope,
-                    memory_type=MemoryType.WORKING_SUMMARY,
-                    content=_build_working_summary(turns),
-                    summary="Current working summary from the most recent completed session.",
-                    source_session_id=session_id,
-                    source_turn_start=1,
-                    source_turn_end=len(turns),
-                    importance=0.9,
-                    confidence=0.8,
-                )
-            )
-
         # Pre-ingestion validation: skip units with empty or overly short content.
         pre_validate_count = len(units)
         units = [u for u in units if len(u.content.strip()) >= 3]
@@ -259,12 +242,27 @@ class MemoryManager:
             self._notify("conflicts_detected", scope_id=scope, count=len(conflicts))
 
         if self.embedder is not None:
-            for unit in units:
-                unit.embedding = self.embedder.encode(
-                    " ".join([unit.summary, unit.content, " ".join(unit.topics), " ".join(unit.entities)])
-                )
+            texts = [
+                " ".join([u.content, " ".join(u.topics), " ".join(u.entities)])
+                for u in units
+            ]
+            embeddings = await self.embedder.encode_batch(texts)
+            for unit, emb in zip(units, embeddings):
+                unit.embedding = emb
 
         added = await self.store.add_memories(units)
+        for unit in units:
+            logger.info(
+                "[Memory] persisted unit memory_id=%s type=%s importance=%.2f confidence=%.2f "
+                "topics=%s entities=%s content=%.120r",
+                unit.memory_id,
+                unit.memory_type.value,
+                unit.importance,
+                unit.confidence,
+                unit.topics,
+                unit.entities,
+                unit.content,
+            )
         await self.clear_cache()
         if self.auto_consolidate:
             consolidation_result = await self.consolidator.consolidate(uid, scope)
@@ -439,8 +437,7 @@ class MemoryManager:
             label = type_name.replace("_", " ")
             lines.append(f"\n### {label}")
             for unit in group:
-                # Prefer content over summary to avoid duplication.
-                text = unit.content.strip() if unit.content.strip() else unit.summary.strip()
+                text = unit.content.strip()
                 if text:
                     freshness = _freshness_tag(unit.updated_at)
                     if freshness:
@@ -659,9 +656,9 @@ class MemoryManager:
         """List all scopes in the store with memory counts."""
         return await self.store.list_scopes(self.user_id)
 
-    async def update_memory(self, memory_id: str, content: str, summary: str = "") -> bool:
+    async def update_memory(self, memory_id: str, content: str) -> bool:
         """Update the content of an existing memory."""
-        result = await self.store.update_content(memory_id, content, summary)
+        result = await self.store.update_content(memory_id, content)
         if result:
             await self.clear_cache()
         return result
@@ -728,9 +725,9 @@ class MemoryManager:
             await self.clear_cache()
         return count
 
-    async def merge_memories(self, id_a: str, id_b: str, merged_content: str, merged_summary: str = "") -> str | None:
+    async def merge_memories(self, id_a: str, id_b: str, merged_content: str) -> str | None:
         """Merge two memories into a new one, superseding both."""
-        new_id = await self.store.merge_memories(id_a, id_b, merged_content, merged_summary)
+        new_id = await self.store.merge_memories(id_a, id_b, merged_content)
         if new_id:
             await self.clear_cache()
             self._notify("merge", id_a=id_a, id_b=id_b, new_id=new_id)
@@ -1103,9 +1100,6 @@ class MemoryManager:
         to_archive_ids: list[str] = []
 
         for u in units:
-            # Never archive working summaries.
-            if u.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             # Never archive pinned memories.
             if u.importance >= 0.99:
                 continue
@@ -1161,8 +1155,6 @@ class MemoryManager:
         to_archive_ids: list[str] = []
 
         for u in units:
-            if u.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             if u.importance >= 0.99:
                 continue
             policy = defaults.get(u.memory_type.value, {"max_age_days": 90, "min_importance": 0.3, "min_access_count": 0})
@@ -1203,7 +1195,6 @@ class MemoryManager:
 
         scope = scope_id or self.scope_id
         defaults = {
-            "working_summary": 7,
             "episodic": 30,
             "semantic": 90,
             "preference": 180,
@@ -1244,7 +1235,7 @@ class MemoryManager:
     ) -> dict:
         """Archive memories matching all specified criteria.
 
-        Pinned and working_summary memories are always excluded.
+        Pinned memories are always excluded.
         All criteria that are set must be satisfied (AND logic).
         """
         from datetime import datetime, timezone
@@ -1255,8 +1246,6 @@ class MemoryManager:
         to_archive: list[str] = []
 
         for u in units:
-            if u.memory_type == MemoryType.WORKING_SUMMARY:
-                continue
             if u.importance >= 0.99:
                 continue
             if memory_type is not None and u.memory_type != memory_type:
@@ -1299,17 +1288,15 @@ class MemoryManager:
         words = len(unit.content.split())
         content_score = min(25, 25 * min(words, 20) / 20.0)
 
-        # 2. Metadata completeness (0-25): topics + entities + summary + tags.
+        # 2. Metadata completeness (0-25): topics + entities + tags.
         meta_points = 0
         if unit.topics:
             meta_points += min(3, len(unit.topics))
         if unit.entities:
             meta_points += min(3, len(unit.entities))
-        if unit.summary:
-            meta_points += 2
         if unit.tags:
             meta_points += min(2, len(unit.tags))
-        metadata_score = min(25, 25 * meta_points / 10.0)
+        metadata_score = min(25, 25 * meta_points / 8.0)
 
         # 3. Access activity (0-25): accessed memories are more valuable.
         access_score = min(25, 25 * min(unit.access_count, 5) / 5.0)
@@ -1580,7 +1567,7 @@ class MemoryManager:
                 urgency += 20 * u.importance
 
             # Quality urgency: low-quality high-importance memories need enrichment.
-            if u.importance > 0.5 and not u.summary and not u.tags:
+            if u.importance > 0.5 and not u.tags:
                 urgency += 10
 
             if urgency > 0:
@@ -2211,7 +2198,6 @@ class MemoryManager:
                 scope_id=target_scope,
                 memory_type=u.memory_type,
                 content=u.content,
-                summary=u.summary,
                 source_session_id=u.source_session_id,
                 topics=list(u.topics),
                 entities=list(u.entities),
@@ -2285,8 +2271,6 @@ class MemoryManager:
 
         for u in units:
             missing = []
-            if not u.summary:
-                missing.append("summary")
             if not u.tags:
                 missing.append("tags")
             if not u.topics:
@@ -2301,7 +2285,7 @@ class MemoryManager:
                     "content_preview": u.content[:80],
                     "importance": u.importance,
                     "missing_fields": missing,
-                    "completeness": round(1.0 - len(missing) / 4.0, 2),
+                    "completeness": round(1.0 - len(missing) / 3.0, 2),
                 })
 
         # Sort by importance (high-importance memories should be enriched first).
@@ -2553,7 +2537,7 @@ class MemoryManager:
                 pass
 
             # No metadata.
-            if not u.summary and not u.tags and not u.topics:
+            if not u.tags and not u.topics:
                 score += 5
                 reasons.append("no_metadata")
 
@@ -2779,46 +2763,6 @@ class MemoryManager:
             },
         }
 
-    async def generate_auto_summaries(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
-        """Generate summaries for memories that don't have them.
-
-        Creates keyword-based summaries from content (first sentence + topics).
-        """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-        generated: list[dict] = []
-
-        for u in units:
-            if u.summary:
-                continue
-
-            # Extract first sentence or first 100 chars.
-            content = u.content.strip()
-            first_sentence = content.split(".")[0].strip()
-            if len(first_sentence) > 100:
-                first_sentence = first_sentence[:97] + "..."
-
-            # Add topic context.
-            topic_str = ""
-            if u.topics:
-                topic_str = f" [{', '.join(u.topics[:3])}]"
-
-            summary = f"{first_sentence}{topic_str}"
-
-            # Apply the summary.
-            await self.store.update_content(u.memory_id, u.content, summary)
-            generated.append({
-                "memory_id": u.memory_id,
-                "type": u.memory_type.value,
-                "summary": summary,
-            })
-
-            if len(generated) >= limit:
-                break
-
-        await self.clear_cache()
-        return generated
-
     async def recalculate_importance(self, scope_id: str | None = None) -> dict:
         """Recalculate importance for all memories based on current signals.
 
@@ -2848,14 +2792,12 @@ class MemoryManager:
 
             # Metadata completeness bonus.
             completeness = 0
-            if u.summary:
-                completeness += 0.25
             if u.tags:
-                completeness += 0.25
+                completeness += 0.33
             if u.topics:
-                completeness += 0.25
+                completeness += 0.33
             if u.entities:
-                completeness += 0.25
+                completeness += 0.34
             new_importance += completeness * 0.1
 
             # Recency bonus.
@@ -2977,7 +2919,6 @@ class MemoryManager:
                 "created_at": unit.created_at,
                 "updated_at": unit.updated_at,
                 "content_preview": unit.content[:80],
-                "has_summary": bool(unit.summary),
                 "tag_count": len(unit.tags),
                 "topic_count": len(unit.topics),
             },
@@ -3052,16 +2993,6 @@ class MemoryManager:
                 "reason": f"{len(integrity['issues'])} integrity issues found",
             })
 
-        # Check for memories without summaries.
-        units = await self.store.list_active(self.user_id, scope, limit=100)
-        unsummarized = sum(1 for u in units if not u.summary)
-        if unsummarized > len(units) * 0.5 and len(units) > 5:
-            actions.append({
-                "action": "auto_summarize",
-                "priority": "low",
-                "reason": f"{unsummarized} memories without summaries",
-            })
-
         actions.sort(key=lambda a: {"high": 0, "medium": 1, "low": 2}.get(a["priority"], 3))
 
         return {
@@ -3082,7 +3013,6 @@ class MemoryManager:
         for u in units:
             record = {
                 "content": u.content,
-                "summary": u.summary or "",
                 "type": u.memory_type.value,
                 "topics": u.topics,
                 "entities": u.entities,
@@ -3213,7 +3143,6 @@ class MemoryManager:
                 "access_count": u.access_count,
                 "tags": u.tags[:3],
                 "topics": u.topics[:3],
-                "has_summary": bool(u.summary),
                 "created_at": u.created_at,
             })
 
@@ -3639,9 +3568,9 @@ class MemoryManager:
             return {"scope_id": scope, "re_embedded": 0, "total": 0}
 
         # Batch encode for efficiency.
-        texts = [f"{u.summary} {u.content}" for u in units]
+        texts = [u.content for u in units]
         try:
-            vectors = emb.encode_batch(texts)
+            vectors = await emb.encode_batch(texts)
         except Exception as exc:
             return {"error": str(exc), "re_embedded": 0}
 
@@ -3714,7 +3643,6 @@ class MemoryManager:
         defaults = {
             "project_state": ["infrastructure"],
             "preference": ["user-preference"],
-            "working_summary": ["summary"],
             "procedural_observation": ["procedure"],
         }
         tag_map = type_tag_map or defaults
@@ -4363,7 +4291,7 @@ class MemoryManager:
         kept: list[MemoryUnit] = []
         used = 0
         for unit in units:
-            text = "\n".join([unit.summary, unit.content]).strip()
+            text = unit.content.strip()
             cost = estimate_tokens(text)
             if kept and used + cost > max_tokens:
                 break
@@ -4445,47 +4373,6 @@ def _extract_entities(text: str) -> list[str]:
     return entities
 
 
-def _summarize_turn(prompt_text: str, response_text: str) -> str:
-    prompt = prompt_text.strip().replace("\n", " ")
-    response = response_text.strip().replace("\n", " ")
-    prompt = prompt[:180]
-    response = response[:180]
-    if response:
-        return f"User asked: {prompt} | Assistant responded: {response}"
-    return f"User asked: {prompt}"
-
-
-def _build_working_summary(turns: list[dict]) -> str:
-    """Build a structured working summary from the session's recent turns.
-
-    Includes a topic line, entity line, key exchange highlights, and turn count context.
-    """
-    recent = turns[-5:]
-    lines = []
-
-    # Extract the main topics and entities mentioned across recent turns.
-    all_text = " ".join(
-        str(t.get("prompt_text", "") or "") + " " + str(t.get("response_text", "") or "")
-        for t in recent
-    )
-    topics = _extract_topics(all_text)
-    entities = _extract_entities(all_text)
-    if topics:
-        lines.append(f"Topics: {', '.join(topics[:6])}")
-    if entities:
-        lines.append(f"Entities: {', '.join(entities[:6])}")
-
-    lines.append(f"Session covered {len(turns)} turn(s), last {len(recent)} shown:")
-    for turn in recent:
-        prompt = str(turn.get("prompt_text", "") or "").strip().replace("\n", " ")
-        response = str(turn.get("response_text", "") or "").strip().replace("\n", " ")
-        if prompt:
-            lines.append(f"User: {prompt[:200]}")
-        if response:
-            lines.append(f"Assistant: {response[:200]}")
-    return "\n".join(lines).strip()
-
-
 def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
     text = f"{prompt_text}\n{response_text}".lower()
     if "i prefer" in text or "my preference" in text or "prefer " in text:
@@ -4518,7 +4405,6 @@ async def _extract_memory_units_for_turn(
                 scope_id=scope_id,
                 memory_type=fact["memory_type"],
                 content=fact["content"][:2000],
-                summary=fact["summary"][:280],
                 source_session_id=session_id,
                 source_turn_start=turn_index,
                 source_turn_end=turn_index,
@@ -4543,7 +4429,6 @@ async def _extract_memory_units_for_turn(
             scope_id=scope_id,
             memory_type=fallback_type,
             content=combined[:4000],
-            summary=_summarize_turn(prompt_text, response_text),
             source_session_id=session_id,
             source_turn_start=turn_index,
             source_turn_end=turn_index,
@@ -4628,7 +4513,6 @@ def _extract_pattern_facts(prompt_text: str, response_text: str) -> list[dict]:
                     {
                         "memory_type": memory_type,
                         "content": _format_memory_content(memory_type, fact_text),
-                        "summary": _summarize_fact(memory_type, fact_text, response_text),
                         "importance": importance,
                         "confidence": confidence,
                     }
@@ -4677,7 +4561,6 @@ def _extract_pattern_facts(prompt_text: str, response_text: str) -> list[dict]:
                     {
                         "memory_type": memory_type,
                         "content": _format_memory_content(memory_type, fact_text),
-                        "summary": _summarize_fact(memory_type, fact_text, response_text),
                         "importance": importance,
                         "confidence": confidence,
                     }
@@ -4711,20 +4594,6 @@ def _format_memory_content(memory_type: MemoryType, fact_text: str) -> str:
     if memory_type == MemoryType.SEMANTIC:
         return f"Persistent fact: {fact_text}."
     return fact_text
-
-
-def _summarize_fact(memory_type: MemoryType, fact_text: str, response_text: str) -> str:
-    label = {
-        MemoryType.PREFERENCE: "Captured user preference",
-        MemoryType.PROJECT_STATE: "Captured project state",
-        MemoryType.PROCEDURAL_OBSERVATION: "Captured workflow guidance",
-        MemoryType.SEMANTIC: "Captured persistent context",
-    }.get(memory_type, "Captured memory")
-    if response_text:
-        response_excerpt = _normalize_space(response_text)[:120]
-        if response_excerpt:
-            return f"{label}: {fact_text}. Assistant acknowledged: {response_excerpt}"
-    return f"{label}: {fact_text}."
 
 
 def _freshness_tag(updated_at: str) -> str:

@@ -20,9 +20,7 @@ from .models import MemoryStatus, MemoryType, MemoryUnit
 
 EMBEDDING_DIM: int = int(os.getenv("EVOLVER_EMBEDDING_DIM", "1024"))
 
-_TSVEC_EXPR = (
-    "to_tsvector('english', coalesce(content,'') || ' ' || coalesce(summary,''))"
-)
+_TSVEC_EXPR = "to_tsvector('english', coalesce(content,''))"
 
 
 class Memory(Base):
@@ -39,7 +37,6 @@ class Memory(Base):
     scope_id: Mapped[str | None] = mapped_column(String, nullable=True)
     memory_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    summary: Mapped[str] = mapped_column(Text, default="")
     source_session_id: Mapped[str] = mapped_column(String, default="")
     source_turn_start: Mapped[int] = mapped_column(Integer, default=0)
     source_turn_end: Mapped[int] = mapped_column(Integer, default=0)
@@ -73,7 +70,6 @@ class Memory(Base):
             scope_id=self.scope_id,
             memory_type=MemoryType(self.memory_type),
             content=self.content,
-            summary=self.summary or "",
             source_session_id=self.source_session_id or "",
             source_turn_start=int(self.source_turn_start or 0),
             source_turn_end=int(self.source_turn_end or 0),
@@ -102,7 +98,6 @@ class Memory(Base):
             scope_id=unit.scope_id,
             memory_type=unit.memory_type.value,
             content=unit.content,
-            summary=unit.summary,
             source_session_id=unit.source_session_id,
             source_turn_start=unit.source_turn_start,
             source_turn_end=unit.source_turn_end,

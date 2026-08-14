@@ -308,39 +308,6 @@ class TestImportanceDecay:
 
 
 # ---------------------------------------------------------------------------
-# Working-summary pruning
-# ---------------------------------------------------------------------------
-
-class TestWorkingSummaryPruning:
-    async def test_only_newest_summary_kept(self, store):
-        ws1 = _make_unit(
-            memory_id="ws-001", scope_id="ws",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Old working summary",
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        ws2 = _make_unit(
-            memory_id="ws-002", scope_id="ws",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Newer working summary",
-            updated_at="2025-01-01T00:00:02+00:00",
-        )
-        ws3 = _make_unit(
-            memory_id="ws-003", scope_id="ws",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Newest working summary",
-            updated_at="2025-01-01T00:00:03+00:00",
-        )
-        await store.add_memories([ws1, ws2, ws3])
-        result = await _consolidator(store).consolidate(UID, "ws")
-        assert result["superseded"] == 2
-        active_ids = {u.memory_id for u in await store.list_active(UID, "ws")}
-        assert "ws-003" in active_ids
-        assert "ws-001" not in active_ids
-        assert "ws-002" not in active_ids
-
-
-# ---------------------------------------------------------------------------
 # Return value and dry_run
 # ---------------------------------------------------------------------------
 
@@ -355,21 +322,23 @@ class TestConsolidateReturnValue:
 
 class TestDryRun:
     async def test_dry_run_returns_counts(self, store):
-        ws1 = _make_unit(
-            memory_id="dws-001", scope_id="dry",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="Old summary",
+        u1 = _make_unit(
+            memory_id="ddr-001", scope_id="dry",
+            memory_type=MemoryType.SEMANTIC,
+            content="The project uses PostgreSQL database for storage",
             updated_at="2025-01-01T00:00:01+00:00",
         )
-        ws2 = _make_unit(
-            memory_id="dws-002", scope_id="dry",
-            memory_type=MemoryType.WORKING_SUMMARY,
-            content="New summary",
+        u2 = _make_unit(
+            memory_id="ddr-002", scope_id="dry",
+            memory_type=MemoryType.SEMANTIC,
+            content="The project uses PostgreSQL database for data storage",
             updated_at="2025-01-01T00:00:02+00:00",
         )
-        await store.add_memories([ws1, ws2])
-        result = await _consolidator(store).dry_run(UID, "dry")
-        assert result["stale_summaries"] == 1
+        await store.add_memories([u1, u2])
+        result = await _consolidator(store, threshold=0.80).dry_run(UID, "dry")
+        assert "exact_duplicates" in result
+        assert "near_duplicates" in result
+        assert "total_actions" in result
 
     async def test_dry_run_does_not_mutate(self, store):
         u1 = _make_unit(

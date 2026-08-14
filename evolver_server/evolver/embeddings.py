@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
@@ -15,9 +16,18 @@ class BaseEmbedder(ABC):
     def encode(self, text: str) -> list[float]:
         """Encode a single text into a vector."""
 
-    def encode_batch(self, texts: list[str]) -> list[list[float]]:
-        """Encode multiple texts. Default implementation calls encode() in a loop."""
-        return [self.encode(t) for t in texts]
+    async def encode_batch(self, texts: list[str]) -> list[list[float]]:
+        """Encode multiple texts in parallel.
+
+        Default implementation runs each ``encode`` call in its own thread
+        concurrently. Subclasses with native async batching (e.g. OpenAIEmbedder)
+        should override this.
+        """
+        if not texts:
+            return []
+        return list(await asyncio.gather(
+            *(asyncio.to_thread(self.encode, t) for t in texts)
+        ))
 
     @property
     @abstractmethod
@@ -121,24 +131,28 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 class OpenAIEmbedder(BaseEmbedder):
     """Embedder using OpenAI text-embedding models (text-embedding-3-small/large).
 
-    Uses the synchronous OpenAI client. The ``dimensions`` parameter is passed
-    to the API so output size matches the configured pgvector column width.
+    ``encode`` uses a synchronous client with retry/backoff.
+    ``encode_batch`` uses an async client, splits input into chunks of
+    ``batch_size`` (default 10), and runs all chunks in parallel.
+
     Note: ``dimensions`` truncation is only supported by text-embedding-3-* models,
     not text-embedding-ada-002.
-
-    Reads OPENAI_API_KEY and OPENAI_EMBEDDING_MODEL from settings automatically.
     """
+
+    _MAX_RETRIES: int = 3
+    _CHUNK_SIZE: int = 10
 
     def __init__(self, dimensions: int = 1024):
         from ..config import get_settings
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI, OpenAI
         except ImportError:
             raise RuntimeError(
                 "openai package not installed. Install with: pip install openai"
             )
         s = get_settings()
         self._client = OpenAI(api_key=s.OPENAI_API_KEY)
+        self._async_client = AsyncOpenAI(api_key=s.OPENAI_API_KEY)
         self._model = s.OPENAI_EMBEDDING_MODEL
         self._dimensions = dimensions
 
@@ -146,23 +160,54 @@ class OpenAIEmbedder(BaseEmbedder):
     def dimensions(self) -> int:
         return self._dimensions
 
-    def encode(self, text: str) -> list[float]:
-        response = self._client.embeddings.create(
-            input=text,
-            model=self._model,
-            dimensions=self._dimensions,
-        )
-        return response.data[0].embedding
+    def _call_api(self, texts: list[str]) -> list[list[float]]:
+        """Synchronous API call with retry/backoff."""
+        import time
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                response = self._client.embeddings.create(
+                    input=texts,
+                    model=self._model,
+                    dimensions=self._dimensions,
+                )
+                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+            except Exception as exc:
+                logger.debug("[Embedder] attempt %d error: %s", attempt + 1, exc)
+                if attempt == self._MAX_RETRIES - 1:
+                    raise
+                time.sleep(2 * (attempt + 1))
+        return []  # unreachable
 
-    def encode_batch(self, texts: list[str]) -> list[list[float]]:
+    async def _acall_api(self, texts: list[str]) -> list[list[float]]:
+        """Async API call with retry/backoff."""
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                response = await self._async_client.embeddings.create(
+                    input=texts,
+                    model=self._model,
+                    dimensions=self._dimensions,
+                )
+                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+            except Exception as exc:
+                logger.debug("[Embedder] async attempt %d error: %s", attempt + 1, exc)
+                if attempt == self._MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(2 * (attempt + 1))
+        return []  # unreachable
+
+    def encode(self, text: str) -> list[float]:
+        return self._call_api([text])[0]
+
+    async def encode_batch(self, texts: list[str]) -> list[list[float]]:
+        """Encode texts in parallel chunks of ``_CHUNK_SIZE``."""
         if not texts:
             return []
-        response = self._client.embeddings.create(
-            input=texts,
-            model=self._model,
-            dimensions=self._dimensions,
-        )
-        return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+        chunks = [texts[i:i + self._CHUNK_SIZE] for i in range(0, len(texts), self._CHUNK_SIZE)]
+        chunk_results = await asyncio.gather(*(self._acall_api(chunk) for chunk in chunks))
+        results: list[list[float]] = []
+        for chunk_result in chunk_results:
+            results.extend(chunk_result)
+        return results
 
 
 def create_embedder(mode: str = "hashing", dimensions: int = 1024) -> BaseEmbedder:
