@@ -4,6 +4,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from marklymem import telemetry
+
 from .models import MemoryUnit, utc_now_iso
 from .store import MemoryStore
 
@@ -33,6 +35,7 @@ class MemoryConsolidator:
         units = await self.store.list_active(user_id, scope_id, limit=2000)
         now = utc_now_iso()
         superseded = 0
+        dropped: list[dict] = []
 
         # Exact duplicate content deduplication.
         seen: dict[tuple[str, str], str] = {}
@@ -44,10 +47,23 @@ class MemoryConsolidator:
                 remaining.append(unit)
                 continue
             await self.store.supersede(unit.memory_id, seen[key], updated_at=now)
+            telemetry.add_event(
+                "superseded",
+                dropped_id=unit.memory_id,
+                kept_id=seen[key],
+                reason="exact_duplicate",
+                dropped_content=unit.content,
+            )
+            dropped.append({
+                "dropped_id": unit.memory_id,
+                "kept_id": seen[key],
+                "reason": "exact_duplicate",
+                "content": unit.content,
+            })
             superseded += 1
 
         # Near-duplicate merging via token overlap similarity.
-        superseded += await self._merge_near_duplicates(remaining, now)
+        superseded += await self._merge_near_duplicates(remaining, now, dropped)
 
         # Entity-based cross-type reinforcement.
         reinforced = await self._reinforce_shared_entities(remaining)
@@ -55,7 +71,7 @@ class MemoryConsolidator:
         # Importance decay for old, unused memories.
         decayed = await self._apply_importance_decay(units, now)
 
-        result = {"superseded": superseded, "decayed": decayed, "reinforced": reinforced}
+        result = {"superseded": superseded, "decayed": decayed, "reinforced": reinforced, "dropped": dropped}
         if superseded or decayed or reinforced:
             logger.info(
                 "[Consolidator] scope=%s superseded=%d decayed=%d reinforced=%d (pool=%d)",
@@ -144,7 +160,9 @@ class MemoryConsolidator:
                 count += 1
         return count
 
-    async def _merge_near_duplicates(self, units: list[MemoryUnit], now: str) -> int:
+    async def _merge_near_duplicates(
+        self, units: list[MemoryUnit], now: str, dropped: list[dict]
+    ) -> int:
         if len(units) < 2 or self.similarity_threshold <= 0.0:
             return 0
 
@@ -179,6 +197,24 @@ class MemoryConsolidator:
                         ):
                             keep, drop = drop, keep
                         await self.store.supersede(drop.memory_id, keep.memory_id, updated_at=now)
+                        similarity = round(float(sim), 4)
+                        telemetry.add_event(
+                            "superseded",
+                            dropped_id=drop.memory_id,
+                            kept_id=keep.memory_id,
+                            reason="near_duplicate",
+                            similarity=similarity,
+                            dropped_content=drop.content,
+                            kept_content=keep.content,
+                        )
+                        dropped.append({
+                            "dropped_id": drop.memory_id,
+                            "kept_id": keep.memory_id,
+                            "reason": "near_duplicate",
+                            "similarity": similarity,
+                            "dropped_content": drop.content,
+                            "kept_content": keep.content,
+                        })
                         alive.discard(drop.memory_id)
                         superseded += 1
         return superseded

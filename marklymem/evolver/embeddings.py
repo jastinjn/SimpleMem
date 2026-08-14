@@ -6,11 +6,15 @@ import logging
 import math
 from abc import ABC, abstractmethod
 
+from marklymem import telemetry
+
 logger = logging.getLogger(__name__)
 
 
 class BaseEmbedder(ABC):
     """Abstract base class for memory embedders."""
+
+    last_input_tokens: int | None = None
 
     @abstractmethod
     def encode(self, text: str) -> list[float]:
@@ -34,6 +38,11 @@ class BaseEmbedder(ABC):
     def dimensions(self) -> int:
         """Return the dimensionality of produced vectors."""
 
+    @property
+    def model(self) -> str:
+        """Return the model identifier for this embedder."""
+        return ""
+
 
 class HashingEmbedder(BaseEmbedder):
     """Deterministic lightweight embedder for phase-1 optional semantic retrieval."""
@@ -44,6 +53,10 @@ class HashingEmbedder(BaseEmbedder):
     @property
     def dimensions(self) -> int:
         return self._dimensions
+
+    @property
+    def model(self) -> str:
+        return "hashing"
 
     def encode(self, text: str) -> list[float]:
         vector = [0.0] * self._dimensions
@@ -100,6 +113,10 @@ class SentenceTransformerEmbedder(BaseEmbedder):
     @property
     def dimensions(self) -> int:
         return self._dimensions_cache or 384
+
+    @property
+    def model(self) -> str:
+        return self.model_name
 
     @property
     def is_available(self) -> bool:
@@ -160,8 +177,12 @@ class OpenAIEmbedder(BaseEmbedder):
     def dimensions(self) -> int:
         return self._dimensions
 
-    def _call_api(self, texts: list[str]) -> list[list[float]]:
-        """Synchronous API call with retry/backoff."""
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def _call_api(self, texts: list[str]) -> tuple[list[list[float]], int]:
+        """Synchronous API call with retry/backoff. Returns (embeddings, total_tokens)."""
         import time
         for attempt in range(self._MAX_RETRIES):
             try:
@@ -170,16 +191,17 @@ class OpenAIEmbedder(BaseEmbedder):
                     model=self._model,
                     dimensions=self._dimensions,
                 )
-                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+                tokens: int = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
+                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)], tokens
             except Exception as exc:
                 logger.debug("[Embedder] attempt %d error: %s", attempt + 1, exc)
                 if attempt == self._MAX_RETRIES - 1:
                     raise
                 time.sleep(2 * (attempt + 1))
-        return []  # unreachable
+        return [], 0  # unreachable
 
-    async def _acall_api(self, texts: list[str]) -> list[list[float]]:
-        """Async API call with retry/backoff."""
+    async def _acall_api(self, texts: list[str]) -> tuple[list[list[float]], int]:
+        """Async API call with retry/backoff. Returns (embeddings, total_tokens)."""
         for attempt in range(self._MAX_RETRIES):
             try:
                 response = await self._async_client.embeddings.create(
@@ -187,26 +209,43 @@ class OpenAIEmbedder(BaseEmbedder):
                     model=self._model,
                     dimensions=self._dimensions,
                 )
-                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+                tokens: int = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
+                return [d.embedding for d in sorted(response.data, key=lambda x: x.index)], tokens
             except Exception as exc:
                 logger.debug("[Embedder] async attempt %d error: %s", attempt + 1, exc)
                 if attempt == self._MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(2 * (attempt + 1))
-        return []  # unreachable
+        return [], 0  # unreachable
 
     def encode(self, text: str) -> list[float]:
-        return self._call_api([text])[0]
+        embs, tokens = self._call_api([text])
+        self.last_input_tokens = tokens or None
+        return embs[0]
 
     async def encode_batch(self, texts: list[str]) -> list[list[float]]:
-        """Encode texts in parallel chunks of ``_CHUNK_SIZE``."""
+        """Encode texts in parallel chunks of ``_CHUNK_SIZE``.
+
+        Each chunk is one OpenAI API call; when tracing is active each becomes a
+        child ``embedding.chunk`` generation span under the caller's active span.
+        """
         if not texts:
             return []
         chunks = [texts[i:i + self._CHUNK_SIZE] for i in range(0, len(texts), self._CHUNK_SIZE)]
-        chunk_results = await asyncio.gather(*(self._acall_api(chunk) for chunk in chunks))
+
+        async def _call_chunk(chunk: list[str]) -> tuple[list[list[float]], int]:
+            with telemetry.generation("embedding.chunk", model=self._model, text_count=len(chunk)) as gen:
+                embs, tokens = await self._acall_api(chunk)
+                telemetry.record_usage(gen, input_tokens=tokens or None, output_tokens=None)
+            return embs, tokens
+
+        chunk_results = await asyncio.gather(*(_call_chunk(chunk) for chunk in chunks))
         results: list[list[float]] = []
-        for chunk_result in chunk_results:
-            results.extend(chunk_result)
+        total_tokens = 0
+        for embs, tokens in chunk_results:
+            results.extend(embs)
+            total_tokens += tokens
+        self.last_input_tokens = total_tokens or None
         return results
 
 

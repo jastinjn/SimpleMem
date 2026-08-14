@@ -4,6 +4,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from marklymem import telemetry
+
 from .embeddings import cosine_similarity
 from .models import MemoryQuery, MemorySearchHit
 from .policy import MemoryPolicy
@@ -28,34 +30,56 @@ class MemoryRetriever:
         self.embedder = embedder
 
     async def retrieve(self, query: MemoryQuery) -> list[MemorySearchHit]:
-        mode = self.retrieval_mode
-        if mode == "auto":
-            mode = self._auto_select_mode(query)
-            logger.info("[Retriever] auto-selected mode=%s for query(%d chars)", mode, len(query.query_text))
-        if mode == "embedding":
-            hits = await self._retrieve_embedding(query)
-            logger.info("[Retriever] mode=embedding scope=%s hits=%d", query.scope_id, len(hits))
+        with telemetry.trace(
+            "memory.retrieve",
+            session_id=query.session_id,
+            user_id=query.user_id,
+            scope_id=query.scope_id,
+            input=query.query_text,
+        ) as root:
+            mode = self.retrieval_mode
+            if mode == "auto":
+                mode = self._auto_select_mode(query)
+                logger.info("[Retriever] auto-selected mode=%s for query(%d chars)", mode, len(query.query_text))
+            root.set_attribute("retrieval.mode", mode)
+            root.set_attribute("top_k", query.top_k)
+
+            if mode == "embedding":
+                hits = await self._retrieve_embedding(query)
+                logger.info("[Retriever] mode=embedding scope=%s hits=%d", query.scope_id, len(hits))
+            elif mode == "hybrid":
+                hits = await self._retrieve_hybrid(query)
+                logger.info("[Retriever] mode=hybrid scope=%s hits=%d", query.scope_id, len(hits))
+            else:
+                limit = min(query.top_k, self.policy.max_injected_units)
+                hits = await self.store.search_keyword(
+                    query.user_id,
+                    query.scope_id,
+                    query_text=query.query_text,
+                    limit=limit,
+                )
+                # Apply tag-based boosting if context tags are provided.
+                if query.context_tags:
+                    hits = _apply_tag_boost(hits, query.context_tags)
+                logger.info(
+                    "[Retriever] mode=keyword scope=%s hits=%d",
+                    query.scope_id, len(hits),
+                )
+
+            root.set_attribute("result_count", len(hits))
+            telemetry.set_output(
+                root,
+                [
+                    {
+                        "memory_id": h.unit.memory_id,
+                        "score": round(float(h.score), 4),
+                        "matched_terms": h.matched_terms,
+                        "content": h.unit.content,
+                    }
+                    for h in hits
+                ],
+            )
             return hits
-        if mode == "hybrid":
-            hits = await self._retrieve_hybrid(query)
-            logger.info("[Retriever] mode=hybrid scope=%s hits=%d", query.scope_id, len(hits))
-            return hits
-        limit = min(query.top_k, self.policy.max_injected_units)
-        hits = await self.store.search_keyword(
-            query.user_id,
-            query.scope_id,
-            query_text=query.query_text,
-            limit=limit,
-        )
-        expanded_flag = False
-        # Apply tag-based boosting if context tags are provided.
-        if query.context_tags:
-            hits = _apply_tag_boost(hits, query.context_tags)
-        logger.info(
-            "[Retriever] mode=keyword scope=%s hits=%d expanded=%s",
-            query.scope_id, len(hits), expanded_flag,
-        )
-        return hits
 
     def _auto_select_mode(self, query: MemoryQuery) -> str:
         """Auto-select retrieval mode based on query characteristics.
@@ -75,7 +99,18 @@ class MemoryRetriever:
             return []
 
         limit = min(query.top_k * 4, 200)
-        query_embedding = self.embedder.encode(query.query_text) if self.embedder else []
+        if self.embedder:
+            with telemetry.span(
+                "embedding",
+                embedder_type=type(self.embedder).__name__,
+                embedding_dim=self.embedder.dimensions,
+                model=self.embedder.model,
+            ) as emb_span:
+                query_embedding = self.embedder.encode(query.query_text)
+                if self.embedder.last_input_tokens is not None:
+                    telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
+        else:
+            query_embedding = []
 
         # Source candidates from both keyword and (if available) vector search.
         kw_hits = await self.store.search_keyword(
@@ -168,7 +203,15 @@ class MemoryRetriever:
     async def _retrieve_embedding(self, query: MemoryQuery) -> list[MemorySearchHit]:
         if self.embedder is None:
             return []
-        query_embedding = self.embedder.encode(query.query_text)
+        with telemetry.span(
+            "embedding",
+            embedder_type=type(self.embedder).__name__,
+            embedding_dim=self.embedder.dimensions,
+            model=self.embedder.model,
+        ) as emb_span:
+            query_embedding = self.embedder.encode(query.query_text)
+            if self.embedder.last_input_tokens is not None:
+                telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
         if not query_embedding:
             return []
 

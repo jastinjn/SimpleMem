@@ -23,6 +23,7 @@ from marklymem.evolver.manager import MemoryManager
 from marklymem.evolver.models import MemoryQuery
 from marklymem.evolver.store import MemoryStore
 
+from . import telemetry
 from .config import get_settings
 from .models import (
     AddBatchRequest,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    tracing_enabled = telemetry.setup_telemetry(settings)
     engine = build_engine(
         settings.DATABASE_URL,
         pool_size=settings.db_pool_size,
@@ -75,10 +77,12 @@ async def lifespan(app: FastAPI):
     print(
         f"[marklymem] ready — routes=/api/ db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
-        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True"
+        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True "
+        f"tracing={'on' if tracing_enabled else 'off'}"
     )
     yield
     await engine.dispose()
+    telemetry.shutdown_telemetry()
 
 
 settings = get_settings()

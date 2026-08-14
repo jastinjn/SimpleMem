@@ -20,8 +20,15 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # OpenTelemetry → self-hosted Langfuse (OTLP/HTTP). Tracing is off unless
+    # OTEL_ENABLED is true AND langfuse host + keys are set. When on, spans include
+    # raw dialogue / memory text.
+    OTEL_ENABLED: bool = False
+    LANGFUSE_HOST: str = ""            # e.g. http://localhost:3000
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
 
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 @lru_cache
 def get_settings() -> Settings:

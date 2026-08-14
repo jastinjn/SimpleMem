@@ -6,6 +6,8 @@ import re
 import uuid
 from collections.abc import Callable
 
+from marklymem import telemetry
+
 from .consolidator import MemoryConsolidator
 from .embeddings import BaseEmbedder, create_embedder
 from .llm_extractor import LLMMemoryExtractor
@@ -105,6 +107,24 @@ class MemoryManager:
         """
         uid = user_id or self.user_id
         scope = scope_id or self.scope_id
+        with telemetry.trace(
+            "memory.ingest", session_id=session_id, user_id=uid, scope_id=scope, input=turns
+        ) as root:
+            result = await self._ingest_session_turns(session_id, turns, uid, scope)
+            root.set_attribute("added", result["added"])
+            root.set_attribute("superseded", result["superseded"])
+            root.set_attribute("decayed", result["decayed"])
+            root.set_attribute("reinforced", result["reinforced"])
+            return result
+
+    async def _ingest_session_turns(
+        self,
+        session_id: str | None,
+        turns: list[dict],
+        uid: str,
+        scope: str,
+    ) -> dict[str, int]:
+        """Inner ingestion pipeline; wrapped by :meth:`ingest_session_turns` in a root span."""
         mode = self.ingestion_mode
         units: list[MemoryUnit] = []
 
@@ -182,7 +202,16 @@ class MemoryManager:
                 " ".join([u.content, " ".join(u.topics), " ".join(u.entities)])
                 for u in units
             ]
-            embeddings = await self.embedder.encode_batch(texts)
+            with telemetry.span(
+                "embedding",
+                embedder_type=type(self.embedder).__name__,
+                text_count=len(texts),
+                embedding_dim=self.embedder.dimensions,
+                model=self.embedder.model,
+            ) as emb_span:
+                embeddings = await self.embedder.encode_batch(texts)
+                if self.embedder.last_input_tokens is not None:
+                    telemetry.record_usage(emb_span, input_tokens=self.embedder.last_input_tokens, output_tokens=None)
             for unit, emb in zip(units, embeddings):
                 unit.embedding = emb
 
@@ -191,7 +220,13 @@ class MemoryManager:
         await self.clear_cache()
         consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:
-            consolidation_result = await self.consolidator.consolidate(uid, scope)
+            with telemetry.span("consolidate") as cons_span:
+                consolidation_result = await self.consolidator.consolidate(uid, scope)
+                cons_span.set_attribute("superseded", consolidation_result.get("superseded", 0))
+                cons_span.set_attribute("decayed", consolidation_result.get("decayed", 0))
+                cons_span.set_attribute("reinforced", consolidation_result.get("reinforced", 0))
+                if consolidation_result.get("dropped"):
+                    telemetry.set_output(cons_span, consolidation_result["dropped"])
         stats = await summarize_memory_store(self.store, uid, scope)
         logger.info(
             "[Memory] ingested %d memory units from session=%s scope=%s active=%d dominant_type=%s",

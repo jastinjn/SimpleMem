@@ -29,6 +29,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from marklymem import telemetry
+
 from .models import MemoryType, MemoryUnit
 
 logger = logging.getLogger(__name__)
@@ -175,31 +177,33 @@ class LLMMemoryExtractor:
         if not windows:
             return []
 
-        sem = asyncio.Semaphore(max(1, self.config.max_parallel))
+        with telemetry.span("extract.session", window_count=len(windows)) as sess_span:
+            sem = asyncio.Semaphore(max(1, self.config.max_parallel))
 
-        async def _run(window: list[dict], start: int, end: int) -> list[MemoryUnit]:
-            async with sem:
-                return await self._extract_window(
-                    window, start, end, user_id, scope_id, session_id
-                )
+            async def _run(window: list[dict], start: int, end: int) -> list[MemoryUnit]:
+                async with sem:
+                    return await self._extract_window(
+                        window, start, end, user_id, scope_id, session_id
+                    )
 
-        results = await asyncio.gather(
-            *(_run(w, s, e) for (w, s, e) in windows),
-            return_exceptions=True,
-        )
+            results = await asyncio.gather(
+                *(_run(w, s, e) for (w, s, e) in windows),
+                return_exceptions=True,
+            )
 
-        units: list[MemoryUnit] = []
-        for res in results:
-            if isinstance(res, BaseException):
-                logger.warning("[LLM extract] window failed: %s", res)
-                continue
-            units.extend(res)
+            units: list[MemoryUnit] = []
+            for res in results:
+                if isinstance(res, BaseException):
+                    logger.warning("[LLM extract] window failed: %s", res)
+                    continue
+                units.extend(res)
 
-        logger.info(
-            "[LLM extract] session=%s → %d units from %d window(s)",
-            session_id, len(units), len(windows),
-        )
-        return units
+            sess_span.set_attribute("unit_count", len(units))
+            logger.info(
+                "[LLM extract] session=%s → %d units from %d window(s)",
+                session_id, len(units), len(windows),
+            )
+            return units
 
     # ---- Internal methods ----
 
@@ -335,14 +339,25 @@ def create_llm_extractor(settings) -> LLMMemoryExtractor | None:
     config = LLMExtractionConfig()
 
     async def _llm_acall(instructions: str, dialogue_text: str) -> ExtractedEntries | None:
-        response = await client.responses.parse(
-            model=config.model,
-            instructions=instructions,
-            input=dialogue_text,
-            text_format=ExtractedEntries,
-            temperature=0.1,
-            max_output_tokens=2048,
-        )
-        return response.output_parsed
+        with telemetry.generation("extract.window", model=config.model) as gen:
+            telemetry.set_input(gen, dialogue_text)
+            response = await client.responses.parse(
+                model=config.model,
+                instructions=instructions,
+                input=dialogue_text,
+                text_format=ExtractedEntries,
+                temperature=0.1,
+                max_output_tokens=2048,
+            )
+            usage = getattr(response, "usage", None)
+            telemetry.record_usage(
+                gen,
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+            )
+            parsed = response.output_parsed
+            if parsed is not None:
+                telemetry.set_output(gen, parsed.model_dump())
+            return parsed
 
     return LLMMemoryExtractor(_llm_acall, config)
