@@ -4,13 +4,11 @@ import os
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    BigInteger,
     Float,
     Index,
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -118,49 +116,5 @@ class Memory(Base):
             tags=unit.tags,
         )
 
-
-class MemoryEvent(Base):
-    __tablename__ = "memory_events"
-
-    event_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    timestamp: Mapped[str] = mapped_column(String, nullable=False)
-    event_type: Mapped[str] = mapped_column(String, nullable=False)
-    memory_id: Mapped[str] = mapped_column(String, nullable=False)
-    scope_id: Mapped[str] = mapped_column(String, default="")
-    detail: Mapped[str] = mapped_column(Text, default="")
-
-
-class MemoryLink(Base):
-    __tablename__ = "memory_links"
-    __table_args__ = (
-        UniqueConstraint("source_id", "target_id", "link_type", name="uq_memory_links"),
-    )
-
-    source_id: Mapped[str] = mapped_column(String, nullable=False, primary_key=True)
-    target_id: Mapped[str] = mapped_column(String, nullable=False, primary_key=True)
-    link_type: Mapped[str] = mapped_column(String, nullable=False, primary_key=True, default="related")
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class MemoryWatch(Base):
-    __tablename__ = "memory_watches"
-    __table_args__ = (
-        UniqueConstraint("memory_id", "watcher", name="uq_memory_watches"),
-    )
-
-    watch_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    memory_id: Mapped[str] = mapped_column(String, nullable=False)
-    watcher: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class MemoryAnnotation(Base):
-    __tablename__ = "memory_annotations"
-
-    annotation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    memory_id: Mapped[str] = mapped_column(String, nullable=False)
-    author: Mapped[str] = mapped_column(String, default="")
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 

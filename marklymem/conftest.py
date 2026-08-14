@@ -76,7 +76,4 @@ async def test_sm(test_engine):
 async def _clean_tables(test_engine):
     """Truncate all tables between tests for isolation."""
     async with test_engine.begin() as conn:
-        await conn.execute(text(
-            "TRUNCATE memories, memory_events, memory_links, memory_watches, "
-            "memory_annotations RESTART IDENTITY CASCADE"
-        ))
+        await conn.execute(text("TRUNCATE memories RESTART IDENTITY CASCADE"))

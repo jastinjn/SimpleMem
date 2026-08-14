@@ -542,11 +542,6 @@ class MemoryManager:
         count = await self.store.restore_snapshot(self.user_id, snapshot)
         return count
 
-    async def get_event_log(self, scope_id: str | None = None, limit: int = 50) -> list[dict]:
-        """Get recent memory mutation events."""
-        scope = scope_id or ""
-        return await self.store.get_event_log(scope_id=scope, limit=limit)
-
     async def find_similar(self, memory_id: str, limit: int = 5) -> list[dict]:
         """Find memories similar to a given memory by topic/entity overlap."""
         results = await self.store.find_similar(memory_id, limit)
@@ -682,52 +677,6 @@ class MemoryManager:
         if isinstance(helpful, str):
             helpful = helpful.lower() in ("positive", "true", "yes", "1", "helpful")
         await self.store.record_feedback(memory_id, helpful)
-        self._notify("feedback", memory_id=memory_id, helpful=helpful)
-
-    async def analyze_feedback_patterns(self, scope_id: str | None = None) -> dict:
-        """Analyze retrieval feedback patterns for a scope.
-
-        Returns statistics about positive/negative feedback distribution,
-        most-boosted and most-penalized memories, and feedback density.
-        """
-        scope = scope_id or self.scope_id
-        events = await self.store.get_event_log(scope_id=scope, limit=10000)
-        feedback_events = [e for e in events if e.get("event_type") == "feedback"]
-
-        positive = 0
-        negative = 0
-        by_memory: dict[str, dict] = {}
-
-        for ev in feedback_events:
-            detail = ev.get("detail", "")
-            mid = ev.get("memory_id", "")
-            is_positive = detail.startswith("positive")
-            if is_positive:
-                positive += 1
-            else:
-                negative += 1
-            if mid:
-                entry = by_memory.setdefault(mid, {"positive": 0, "negative": 0, "memory_id": mid})
-                if is_positive:
-                    entry["positive"] += 1
-                else:
-                    entry["negative"] += 1
-
-        total = positive + negative
-        sorted_memories = sorted(by_memory.values(), key=lambda x: x["positive"] - x["negative"], reverse=True)
-        most_boosted = sorted_memories[:5] if sorted_memories else []
-        most_penalized = sorted(by_memory.values(), key=lambda x: x["negative"] - x["positive"], reverse=True)[:5]
-
-        return {
-            "scope_id": scope,
-            "total_feedback": total,
-            "positive": positive,
-            "negative": negative,
-            "positive_rate": round(positive / total, 4) if total else 0.0,
-            "unique_memories_with_feedback": len(by_memory),
-            "most_boosted": most_boosted,
-            "most_penalized": most_penalized,
-        }
 
     async def get_pool_summary(self, scope_id: str | None = None, max_per_type: int = 3) -> str:
         """Generate a concise summary of the entire memory pool.
@@ -1032,9 +981,7 @@ class MemoryManager:
         # 4. Importance + reinforcement (0-15).
         importance_score = 15 * unit.importance
 
-        # 5. Link connectivity (0-10).
-        links = await self.store.get_links(memory_id)
-        link_score = min(10, 10 * min(len(links), 3) / 3.0)
+        link_score = 0.0
 
         total = round(content_score + metadata_score + access_score + importance_score + link_score, 1)
         return {
@@ -1061,56 +1008,6 @@ class MemoryManager:
             scored.append(result)
         scored.sort(key=lambda x: x["score"])
         return scored[:limit]
-
-    # --- Memory watches ---
-
-    async def watch_memory(self, memory_id: str, watcher: str) -> bool:
-        """Watch a memory for changes."""
-        return await self.store.add_watch(memory_id, watcher)
-
-    async def unwatch_memory(self, memory_id: str, watcher: str) -> bool:
-        """Stop watching a memory."""
-        return await self.store.remove_watch(memory_id, watcher)
-
-    async def get_watchers(self, memory_id: str) -> list[str]:
-        """Get all watchers for a memory."""
-        return await self.store.get_watchers(memory_id)
-
-    async def get_watched_memories(self, watcher: str) -> list[str]:
-        """Get all memory IDs watched by a watcher."""
-        return await self.store.get_watched_memories(watcher)
-
-    # --- Memory annotations ---
-
-    async def add_annotation(self, memory_id: str, content: str, author: str = "") -> int:
-        """Add an annotation to a memory."""
-        return await self.store.add_annotation(memory_id, content, author)
-
-    async def get_annotations(self, memory_id: str) -> list[dict]:
-        """Get all annotations for a memory."""
-        return await self.store.get_annotations(memory_id)
-
-    async def delete_annotation(self, annotation_id: int) -> bool:
-        """Delete an annotation by ID."""
-        return await self.store.delete_annotation(annotation_id)
-
-    # --- Memory links ---
-
-    async def add_link(self, source_id: str, target_id: str, link_type: str = "related") -> bool:
-        """Create a directed link between two memories."""
-        return await self.store.add_link(source_id, target_id, link_type)
-
-    async def remove_link(self, source_id: str, target_id: str, link_type: str | None = None) -> int:
-        """Remove a link between two memories."""
-        return await self.store.remove_link(source_id, target_id, link_type)
-
-    async def get_links(self, memory_id: str, direction: str = "both") -> list[dict]:
-        """Get all links for a memory."""
-        return await self.store.get_links(memory_id, direction)
-
-    async def get_linked_memories(self, memory_id: str, link_type: str | None = None) -> list[MemoryUnit]:
-        """Get all memory units linked to a given memory."""
-        return await self.store.get_linked_memories(memory_id, link_type)
 
     async def migrate_scope(self, from_scope: str, to_scope: str) -> dict:
         """Move all active memories from one scope to another.
@@ -1297,108 +1194,6 @@ class MemoryManager:
         """Retrieve multiple memories by their IDs in a single operation."""
         return await self.store.get_by_ids(memory_ids)
 
-    async def analyze_memory_impact(self, memory_id: str) -> dict:
-        """Analyze what depends on a memory and what would be affected by archiving it.
-
-        Performs a transitive traversal of incoming depends_on links.
-        """
-        unit = await self.store.get_by_id(memory_id)
-        if not unit:
-            return {"error": "Memory not found", "memory_id": memory_id}
-
-        # Find direct dependents (memories that depend_on this one).
-        incoming = await self.store.get_links(memory_id, direction="incoming")
-        direct_dependents = [
-            lnk["source_id"] for lnk in incoming if lnk["link_type"] == "depends_on"
-        ]
-
-        # Transitive dependents via BFS.
-        all_dependents: list[str] = []
-        visited = {memory_id}
-        queue = list(direct_dependents)
-        while queue:
-            dep_id = queue.pop(0)
-            if dep_id in visited:
-                continue
-            visited.add(dep_id)
-            all_dependents.append(dep_id)
-            further = await self.store.get_links(dep_id, direction="incoming")
-            for lnk in further:
-                if lnk["link_type"] == "depends_on" and lnk["source_id"] not in visited:
-                    queue.append(lnk["source_id"])
-
-        # Other relationships.
-        all_links = await self.store.get_links(memory_id, direction="both")
-        elaborations = [lnk["source_id"] for lnk in all_links if lnk["link_type"] == "elaborates" and lnk["direction"] == "incoming"]
-        contradictions = [
-            lnk["target_id"] if lnk["direction"] == "outgoing" else lnk["source_id"]
-            for lnk in all_links if lnk["link_type"] == "contradicts"
-        ]
-
-        # Watchers.
-        watchers = await self.store.get_watchers(memory_id)
-
-        return {
-            "memory_id": memory_id,
-            "content_preview": unit.content[:80],
-            "direct_dependents": direct_dependents,
-            "transitive_dependents": all_dependents,
-            "elaborations": elaborations,
-            "contradictions": contradictions,
-            "watchers": watchers,
-            "total_affected": len(all_dependents) + len(elaborations),
-            "safe_to_archive": len(all_dependents) == 0,
-        }
-
-    async def detect_dependency_cycles(self, scope_id: str | None = None) -> list[list[str]]:
-        """Detect circular dependency chains in depends_on links.
-
-        Returns a list of cycles, each cycle being a list of memory IDs.
-        """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-
-        # Build adjacency list for depends_on links.
-        adj: dict[str, list[str]] = {}
-        for u in units:
-            outgoing = await self.store.get_links(u.memory_id, direction="outgoing")
-            deps = [lnk["target_id"] for lnk in outgoing if lnk["link_type"] == "depends_on"]
-            if deps:
-                adj[u.memory_id] = deps
-
-        # DFS-based cycle detection.
-        WHITE, GRAY, BLACK = 0, 1, 2
-        color: dict[str, int] = {mid: WHITE for mid in adj}
-        parent: dict[str, str | None] = {}
-        cycles: list[list[str]] = []
-
-        def dfs(node: str) -> None:
-            color[node] = GRAY
-            for neighbor in adj.get(node, []):
-                if neighbor not in color:
-                    continue
-                if color[neighbor] == GRAY:
-                    # Found a cycle — reconstruct it.
-                    cycle = [neighbor]
-                    cur = node
-                    while cur != neighbor:
-                        cycle.append(cur)
-                        cur = parent.get(cur, neighbor)
-                    cycle.append(neighbor)
-                    cycle.reverse()
-                    cycles.append(cycle)
-                elif color[neighbor] == WHITE:
-                    parent[neighbor] = node
-                    dfs(neighbor)
-            color[node] = BLACK
-
-        for node in adj:
-            if color[node] == WHITE:
-                parent[node] = None
-                dfs(node)
-
-        return cycles
-
     async def build_version_tree(self, memory_id: str) -> dict:
         """Build a version tree rooted at a memory, following supersedes chains.
 
@@ -1555,30 +1350,6 @@ class MemoryManager:
         stale.sort(key=lambda x: x["staleness_factor"], reverse=True)
         return stale[:limit]
 
-    async def bulk_add_links(
-        self,
-        links: list[dict],
-    ) -> dict:
-        """Create multiple links at once.
-
-        Each link dict should have: source_id, target_id, link_type (optional, defaults to 'related').
-        Returns count of created and skipped links.
-        """
-        created = 0
-        skipped = 0
-        for link in links:
-            source = link.get("source_id", "")
-            target = link.get("target_id", "")
-            link_type = link.get("link_type", "related")
-            if not source or not target:
-                skipped += 1
-                continue
-            if await self.store.add_link(source, target, link_type):
-                created += 1
-            else:
-                skipped += 1
-        return {"created": created, "skipped": skipped, "total": len(links)}
-
     async def get_memory_summary_report(self, scope_id: str | None = None) -> dict:
         """Generate a comprehensive summary report of a scope's memory state.
 
@@ -1652,45 +1423,6 @@ class MemoryManager:
                 })
 
         return suggestions[:limit]
-
-    async def export_link_graph(self, scope_id: str | None = None) -> dict:
-        """Export the memory link graph for visualization.
-
-        Returns nodes (memories) and edges (links) in a format
-        suitable for graph visualization tools.
-        """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-
-        nodes = []
-        edges = []
-        seen_edges: set[tuple[str, str, str]] = set()
-
-        for u in units:
-            nodes.append({
-                "id": u.memory_id,
-                "type": u.memory_type.value,
-                "label": u.content[:40],
-                "importance": u.importance,
-                "topics": u.topics[:3],
-            })
-            links = await self.store.get_links(u.memory_id, direction="outgoing")
-            for lnk in links:
-                edge_key = (lnk["source_id"], lnk["target_id"], lnk["link_type"])
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    edges.append({
-                        "source": lnk["source_id"],
-                        "target": lnk["target_id"],
-                        "type": lnk["link_type"],
-                    })
-
-        return {
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "nodes": nodes,
-            "edges": edges,
-        }
 
     async def get_deduplication_report(self, scope_id: str | None = None, threshold: float = 0.75) -> dict:
         """Generate a comprehensive deduplication report for a scope.
@@ -2030,69 +1762,6 @@ class MemoryManager:
             "warning": utilization >= 0.9,
         }
 
-    async def cascade_archive(self, memory_id: str) -> dict:
-        """Archive a memory and all memories that depend on it (transitively)."""
-
-        impact = await self.analyze_memory_impact(memory_id)
-        if "error" in impact:
-            return impact
-
-        to_archive_all = [memory_id] + impact["transitive_dependents"]
-        active_ids = []
-        for mid in to_archive_all:
-            unit = await self.store.get_by_id(mid)
-            if unit and unit.status.value == "active":
-                active_ids.append(mid)
-        archived = await self.store.bulk_archive(active_ids)
-
-        return {
-            "archived": archived,
-            "root_memory": memory_id,
-            "dependents_archived": archived - 1 if archived > 0 else 0,
-        }
-
-    async def get_link_graph_stats(self, scope_id: str | None = None) -> dict:
-        """Compute statistics about the memory link graph."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-
-        total_links = 0
-        link_type_counts: dict[str, int] = {}
-        linked_memories = set()
-        max_connections = 0
-        most_connected = None
-
-        for u in units:
-            links = await self.store.get_links(u.memory_id, direction="both")
-            conn_count = len(links)
-            total_links += len([lnk for lnk in links if lnk["direction"] == "outgoing"])
-
-            if conn_count > 0:
-                linked_memories.add(u.memory_id)
-
-            if conn_count > max_connections:
-                max_connections = conn_count
-                most_connected = u.memory_id
-
-            for lnk in links:
-                lt = lnk["link_type"]
-                link_type_counts[lt] = link_type_counts.get(lt, 0) + 1
-
-        # Divide by 2 since we counted each link type from both sides.
-        for lt in link_type_counts:
-            link_type_counts[lt] = link_type_counts[lt] // 2 or link_type_counts[lt]
-
-        return {
-            "total_memories": len(units),
-            "linked_memories": len(linked_memories),
-            "unlinked_memories": len(units) - len(linked_memories),
-            "total_links": total_links,
-            "link_types": link_type_counts,
-            "most_connected": most_connected,
-            "max_connections": max_connections,
-            "connectivity_ratio": round(len(linked_memories) / max(len(units), 1), 4),
-        }
-
     async def forecast_expiry(self, scope_id: str | None = None) -> dict:
         """Forecast memory expirations over upcoming time windows."""
         from datetime import datetime, timezone
@@ -2217,12 +1886,6 @@ class MemoryManager:
                 score += 5
                 reasons.append("no_metadata")
 
-            # No links.
-            links = await self.store.get_links(u.memory_id, direction="both")
-            if not links:
-                score += 3
-                reasons.append("isolated")
-
             if score > 10:
                 recommendations.append({
                     "memory_id": u.memory_id,
@@ -2248,7 +1911,6 @@ class MemoryManager:
         report = await self.get_memory_summary_report(scope)
         access = await self.analyze_access_frequency(scope)
         density = await self.get_content_density_stats(scope)
-        link_stats = await self.get_link_graph_stats(scope)
         forecast = await self.forecast_expiry(scope)
         quota = await self.check_scope_quota(scope)
         archive_recs = await self.recommend_archival(scope, limit=5)
@@ -2273,11 +1935,6 @@ class MemoryManager:
                 "avg_tokens": density.get("avg_tokens", 0),
                 "size_buckets": density.get("size_buckets", {}),
             },
-            "graph": {
-                "linked_memories": link_stats.get("linked_memories", 0),
-                "total_links": link_stats.get("total_links", 0),
-                "connectivity": link_stats.get("connectivity_ratio", 0),
-            },
             "expiry_forecast": forecast.get("forecast", {}),
             "quota": {
                 "utilization": quota.get("utilization", 0),
@@ -2286,52 +1943,6 @@ class MemoryManager:
             "top_archival_candidates": len(archive_recs),
             "urgent_items": len(urgency),
         }
-
-    async def suggest_links(self, scope_id: str | None = None, threshold: float = 0.5, limit: int = 20) -> list[dict]:
-        """Suggest links between memories that share topics/entities but aren't linked.
-
-        Uses topic and entity overlap to identify potential relationships.
-        """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
-        suggestions: list[dict] = []
-
-        # Build existing link set.
-        linked_pairs: set[tuple[str, str]] = set()
-        for u in units:
-            links = await self.store.get_links(u.memory_id, direction="both")
-            for lnk in links:
-                pair = tuple(sorted([lnk["source_id"], lnk["target_id"]]))
-                linked_pairs.add(pair)
-
-        # Check all pairs.
-        for i, a in enumerate(units):
-            a_features = set(a.topics) | set(a.entities)
-            if not a_features:
-                continue
-            for b in units[i + 1:]:
-                pair = tuple(sorted([a.memory_id, b.memory_id]))
-                if pair in linked_pairs:
-                    continue
-                b_features = set(b.topics) | set(b.entities)
-                if not b_features:
-                    continue
-                overlap = len(a_features & b_features)
-                union = len(a_features | b_features)
-                if union > 0 and overlap / union >= threshold:
-                    shared = list(a_features & b_features)[:5]
-                    suggestions.append({
-                        "memory_a": a.memory_id,
-                        "memory_b": b.memory_id,
-                        "similarity": round(overlap / union, 4),
-                        "shared_features": shared,
-                        "suggested_type": "related",
-                        "preview_a": a.content[:50],
-                        "preview_b": b.content[:50],
-                    })
-
-        suggestions.sort(key=lambda x: x["similarity"], reverse=True)
-        return suggestions[:limit]
 
     async def generate_detailed_scope_comparison(self, scope_a: str, scope_b: str) -> dict:
         """Generate a detailed comparison report between two scopes.
@@ -2461,11 +2072,6 @@ class MemoryManager:
             if u.access_count > 0:
                 new_importance += min(u.access_count * 0.02, 0.2)
 
-            # Link bonus.
-            links = await self.store.get_links(u.memory_id, direction="both")
-            if links:
-                new_importance += min(len(links) * 0.03, 0.15)
-
             # Metadata completeness bonus.
             completeness = 0
             if u.tags:
@@ -2572,19 +2178,6 @@ class MemoryManager:
         if not unit:
             return {"error": "Memory not found", "memory_id": memory_id}
 
-        # Get events.
-        events = await self.store.get_event_log(limit=100)
-        memory_events = [e for e in events if e.get("memory_id") == memory_id]
-
-        # Get links.
-        links = await self.store.get_links(memory_id, direction="both")
-
-        # Get annotations.
-        annotations = await self.store.get_annotations(memory_id)
-
-        # Get watchers.
-        watchers = await self.store.get_watchers(memory_id)
-
         return {
             "memory_id": memory_id,
             "current_state": {
@@ -2598,13 +2191,6 @@ class MemoryManager:
                 "tag_count": len(unit.tags),
                 "topic_count": len(unit.topics),
             },
-            "relationships": {
-                "link_count": len(links),
-                "annotation_count": len(annotations),
-                "watcher_count": len(watchers),
-            },
-            "event_count": len(memory_events),
-            "events": memory_events[:10],
         }
 
     async def get_maintenance_recommendations(self, scope_id: str | None = None) -> dict:
@@ -2658,15 +2244,6 @@ class MemoryManager:
                 "action": "tag_memories",
                 "priority": "low",
                 "reason": "Untagged memories found — consider auto-tagging",
-            })
-
-        # Check integrity.
-        integrity = await self.store.validate_integrity()
-        if integrity.get("issues"):
-            actions.append({
-                "action": "cleanup_orphans",
-                "priority": "medium",
-                "reason": f"{len(integrity['issues'])} integrity issues found",
             })
 
         actions.sort(key=lambda a: {"high": 0, "medium": 1, "low": 2}.get(a["priority"], 3))
@@ -2999,11 +2576,7 @@ class MemoryManager:
         retention = await self.apply_typed_retention(scope)
         results["retention_archived"] = retention["archived"]
 
-        # 4. Clean orphaned references.
-        orphans = await self.store.cleanup_orphans()
-        results["orphans_removed"] = orphans["total_removed"]
-
-        # 5. Garbage collect superseded memories.
+        # 4. Garbage collect superseded memories.
         gc = await self.store.garbage_collect(scope)
         results["gc_removed"] = gc.get("removed", 0)
 
@@ -3029,7 +2602,6 @@ class MemoryManager:
         units = await self.store.list_active(self.user_id, scope, limit=5000)
         health = await self.store.compute_health_score(self.user_id, scope)
         db_info = await self.store.get_db_size()
-        integrity = await self.store.validate_integrity()
 
         type_counts: dict[str, int] = {}
         pinned = 0
@@ -3053,7 +2625,6 @@ class MemoryManager:
             "type_distribution": type_counts,
             "health": health,
             "db": db_info,
-            "integrity_valid": integrity["valid"],
             "features": {
                 "pinned": pinned,
                 "with_ttl": with_ttl,
@@ -3091,20 +2662,10 @@ class MemoryManager:
         if with_ttl == 0 and len(units) > 10:
             hints.append("No memories have TTL set: consider running auto-ttl to prevent unbounded growth.")
 
-        # Check DB size.
-        db_info = await self.store.get_db_size()
-        if db_info["freelist_ratio"] > 0.2:
-            hints.append(f"High freelist ratio ({db_info['freelist_ratio']:.0%}): run gc and compact to reclaim space.")
-
         # Check for duplicates.
         dupes = await self.store.find_duplicates(self.user_id, scope, threshold=0.85)
         if dupes:
             hints.append(f"{len(dupes)} near-duplicate pair(s) found: consider consolidation.")
-
-        # Check integrity.
-        integrity = await self.store.validate_integrity()
-        if not integrity["valid"]:
-            hints.append(f"Integrity issues found: {', '.join(integrity['issues'][:3])}")
 
         if not hints:
             hints.append("Store looks healthy — no optimizations needed.")
@@ -3126,7 +2687,6 @@ class MemoryManager:
         accessed_count = 0
         with_ttl = 0
         pinned_count = 0
-        total_links = 0
         importance_sum = 0.0
 
         for u in units:
@@ -3139,7 +2699,6 @@ class MemoryManager:
             if u.importance >= 0.99:
                 pinned_count += 1
             importance_sum += u.importance
-            total_links += len(await self.store.get_links(u.memory_id, direction="outgoing"))
 
         n = max(len(units), 1)
         return {
@@ -3152,52 +2711,8 @@ class MemoryManager:
             "total_accesses": total_access,
             "pinned_count": pinned_count,
             "with_ttl": with_ttl,
-            "total_outgoing_links": total_links,
             "health_components": health.get("components", {}),
         }
-
-    async def find_memory_clusters(self, scope_id: str | None = None) -> list[list[str]]:
-        """Find connected clusters of memories via links.
-
-        Returns list of clusters, each cluster being a list of memory IDs.
-        Isolated (unlinked) memories are not included.
-        """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-        unit_ids = {u.memory_id for u in units}
-
-        # Build adjacency from links.
-        adj: dict[str, set[str]] = {mid: set() for mid in unit_ids}
-        for mid in unit_ids:
-            links = await self.store.get_links(mid, direction="both")
-            for lnk in links:
-                other = lnk["target_id"] if lnk["direction"] == "outgoing" else lnk["source_id"]
-                if other in unit_ids:
-                    adj[mid].add(other)
-                    adj[other].add(mid)
-
-        # BFS connected components.
-        visited: set[str] = set()
-        clusters: list[list[str]] = []
-        for mid in unit_ids:
-            if mid in visited or not adj[mid]:
-                continue
-            cluster: list[str] = []
-            queue = [mid]
-            while queue:
-                node = queue.pop(0)
-                if node in visited:
-                    continue
-                visited.add(node)
-                cluster.append(node)
-                for neighbor in adj[node]:
-                    if neighbor not in visited:
-                        queue.append(neighbor)
-            if len(cluster) > 1:
-                clusters.append(cluster)
-
-        clusters.sort(key=len, reverse=True)
-        return clusters
 
     async def get_embedder_info(self) -> dict:
         """Return information about the current embedder configuration."""
@@ -3499,11 +3014,9 @@ class MemoryManager:
     ) -> list[dict]:
         """Export the memory event log as a compliance-ready audit trail.
 
-        Returns chronologically ordered events with memory IDs, types, and timestamps.
+        Event log has been removed; observability is handled via OTel/Langfuse traces.
         """
-        scope = scope_id or self.scope_id
-        events = await self.store.get_event_log(scope_id=scope, limit=limit)
-        return events
+        return []
 
     async def generate_action_plan(
         self,
@@ -3575,17 +3088,6 @@ class MemoryManager:
                     for s in balance["suggestions"][:3]
                 ),
                 "command": "memory type-balance --scope " + scope,
-            })
-
-        # 6. Integrity check.
-        integrity = await self.store.validate_integrity()
-        if not integrity.get("valid"):
-            actions.append({
-                "action": "fix_integrity",
-                "priority": "high",
-                "count": sum(len(v) for v in integrity.get("issues", {}).values()),
-                "description": "Database integrity issues detected",
-                "command": "memory cleanup-orphans",
             })
 
         # Sort by priority.
@@ -3762,16 +3264,7 @@ class MemoryManager:
         issues = []
         checks = {}
 
-        # 1. Integrity.
-        integrity = await self.store.validate_integrity()
-        checks["integrity"] = {
-            "passed": integrity.get("valid", False),
-            "issues": integrity.get("issues", {}),
-        }
-        if not integrity.get("valid"):
-            issues.append("Database integrity issues detected")
-
-        # 2. Health score.
+        # 1. Health score.
         health = await self.store.compute_health_score(self.user_id, scope)
         health_score = health.get("score", 0)
         checks["health_score"] = {
@@ -3850,7 +3343,6 @@ class MemoryManager:
                 "max_injected_tokens": self.policy.max_injected_tokens,
             },
             "db": await self.store.get_db_size(),
-            "integrity": await self.store.validate_integrity(),
         }
 
     async def generate_operator_report(self, scope_id: str | None = None) -> dict:

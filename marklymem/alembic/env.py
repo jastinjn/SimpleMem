@@ -7,10 +7,6 @@ from marklymem.config import get_settings
 from marklymem.evolver.schema import (  # noqa: F401 — register all models
     Base,
     Memory,
-    MemoryAnnotation,
-    MemoryEvent,
-    MemoryLink,
-    MemoryWatch,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 

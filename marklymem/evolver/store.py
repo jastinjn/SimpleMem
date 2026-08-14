@@ -6,18 +6,11 @@ from typing import Iterable
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .models import MemorySearchHit, MemoryStatus, MemoryType, MemoryUnit
 from .models import utc_now_iso as _utc_now_iso
-from .schema import (
-    Memory,
-    MemoryAnnotation,
-    MemoryEvent,
-    MemoryLink,
-    MemoryWatch,
-)
+from .schema import Memory
 
 logger = logging.getLogger(__name__)
 
@@ -25,27 +18,12 @@ logger = logging.getLogger(__name__)
 class MemoryStore:
     """PostgreSQL-backed async store for long-term memory units."""
 
-    def __init__(self, sm: async_sessionmaker[AsyncSession], enable_event_log: bool = True):
+    def __init__(self, sm: async_sessionmaker[AsyncSession]):
         self._sm = sm
-        self._enable_event_log = enable_event_log
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _log_event(self, s: AsyncSession, event_type: str, memory_id: str, scope_id: str = "", detail: str = "") -> None:
-        if not self._enable_event_log:
-            return
-        try:
-            s.add(MemoryEvent(
-                timestamp=_utc_now_iso(),
-                event_type=event_type,
-                memory_id=memory_id,
-                scope_id=scope_id,
-                detail=detail[:500],
-            ))
-        except Exception:
-            pass
 
     def _where_user_scope(self, user_id: str, scope_id: str | None):
         if not user_id:
@@ -92,7 +70,6 @@ class MemoryStore:
                     set_={k: vals[k] for k in vals if k != "memory_id"},
                 )
                 await s.execute(stmt)
-                await self._log_event(s, "create", unit.memory_id, unit.scope_id or "", f"type={unit.memory_type.value}")
                 count += 1
             await s.commit()
         return count
@@ -151,7 +128,6 @@ class MemoryStore:
                 update(Memory).where(Memory.memory_id == memory_id)
                 .values(status=MemoryStatus.SUPERSEDED.value, superseded_by=superseded_by, updated_at=updated_at)
             )
-            await self._log_event(s, "supersede", memory_id, detail=f"by={superseded_by[:36]}")
             await s.commit()
 
     async def mark_accessed(self, memory_ids: Iterable[str], accessed_at: str) -> None:
@@ -187,8 +163,6 @@ class MemoryStore:
                 update(Memory).where(Memory.memory_id.in_(active_ids))
                 .values(status=MemoryStatus.ARCHIVED.value, updated_at=now)
             )
-            for mid, scope in rows:
-                await self._log_event(s, "archive", mid, scope or "")
             await s.commit()
         return len(active_ids)
 
@@ -231,7 +205,6 @@ class MemoryStore:
                 return False
             row.importance = 0.99
             row.updated_at = _utc_now_iso()
-            await self._log_event(s, "pin", memory_id)
             await s.commit()
         return True
 
@@ -252,15 +225,12 @@ class MemoryStore:
             if row is None:
                 return
             current = float(row.importance)
-            scope = row.scope_id or ""
             if helpful:
                 new_importance = min(0.95, current + 0.03)
             else:
                 new_importance = max(0.1, current - 0.05)
             row.importance = round(new_importance, 4)
             row.updated_at = _utc_now_iso()
-            direction = "positive" if helpful else "negative"
-            await self._log_event(s, "feedback", memory_id, scope_id=scope, detail=f"{direction}: {current:.4f} -> {new_importance:.4f}")
             await s.commit()
 
     # ------------------------------------------------------------------
@@ -498,23 +468,6 @@ class MemoryStore:
         pass  # Aurora/PG autovacuums; no-op here.
 
     # ------------------------------------------------------------------
-    # Event log
-    # ------------------------------------------------------------------
-
-    async def get_event_log(self, scope_id: str = "", limit: int = 50) -> list[dict]:
-        async with self._sm() as s:
-            q = select(MemoryEvent).order_by(MemoryEvent.event_id.desc()).limit(limit)
-            if scope_id:
-                q = q.where(MemoryEvent.scope_id == scope_id)
-            rows = (await s.execute(q)).scalars().all()
-        return [
-            {"event_id": r.event_id, "timestamp": r.timestamp, "event_type": r.event_type,
-             "memory_id": r.memory_id, "scope_id": r.scope_id, "detail": r.detail}
-            for r in rows
-        ]
-
-
-    # ------------------------------------------------------------------
     # Tags
     # ------------------------------------------------------------------
 
@@ -655,9 +608,6 @@ class MemoryStore:
             embedding=list(source.embedding),
         )
         await self.add_memories([shared])
-        async with self._sm() as s:
-            await self._log_event(s, "share", memory_id, target_scope_id, f"new_id={new_id[:36]}")
-            await s.commit()
         return new_id
 
     # ------------------------------------------------------------------
@@ -689,9 +639,6 @@ class MemoryStore:
         await self.add_memories([merged])
         await self.supersede(id_a, new_id, now)
         await self.supersede(id_b, new_id, now)
-        async with self._sm() as s:
-            await self._log_event(s, "merge", new_id, a.scope_id or "", f"from={id_a[:18]}+{id_b[:18]}")
-            await s.commit()
         return new_id
 
     async def find_similar(self, memory_id: str, limit: int = 5) -> list[tuple[MemoryUnit, float]]:
@@ -799,60 +746,6 @@ class MemoryStore:
                 await s.commit()
         return {"removed": len(orphans), "kept_superseded": len(superseded_ids) - len(orphans)}
 
-    async def validate_integrity(self) -> dict:
-        async with self._sm() as s:
-            orphaned_links = (await s.execute(text(
-                "SELECT COUNT(*) FROM memory_links l WHERE NOT EXISTS "
-                "(SELECT 1 FROM memories m WHERE m.memory_id = l.source_id) "
-                "OR NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = l.target_id)"
-            ))).scalar() or 0
-            orphaned_watches = (await s.execute(text(
-                "SELECT COUNT(*) FROM memory_watches w WHERE NOT EXISTS "
-                "(SELECT 1 FROM memories m WHERE m.memory_id = w.memory_id)"
-            ))).scalar() or 0
-            orphaned_annotations = (await s.execute(text(
-                "SELECT COUNT(*) FROM memory_annotations a WHERE NOT EXISTS "
-                "(SELECT 1 FROM memories m WHERE m.memory_id = a.memory_id)"
-            ))).scalar() or 0
-            dangling_superseded = (await s.execute(text(
-                "SELECT COUNT(*) FROM memories m WHERE m.superseded_by != '' "
-                "AND NOT EXISTS (SELECT 1 FROM memories m2 WHERE m2.memory_id = m.superseded_by)"
-            ))).scalar() or 0
-        issues = []
-        if orphaned_links:
-            issues.append(f"{orphaned_links} orphaned link(s)")
-        if orphaned_watches:
-            issues.append(f"{orphaned_watches} orphaned watch(es)")
-        if orphaned_annotations:
-            issues.append(f"{orphaned_annotations} orphaned annotation(s)")
-        if dangling_superseded:
-            issues.append(f"{dangling_superseded} dangling superseded_by")
-        return {
-            "valid": len(issues) == 0, "issues": issues,
-            "orphaned_links": orphaned_links, "orphaned_watches": orphaned_watches,
-            "orphaned_annotations": orphaned_annotations, "dangling_superseded": dangling_superseded,
-        }
-
-    async def cleanup_orphans(self) -> dict:
-        async with self._sm() as s:
-            r_links = await s.execute(text(
-                "DELETE FROM memory_links WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = memory_links.source_id) "
-                "OR NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = memory_links.target_id)"
-            ))
-            r_watches = await s.execute(text(
-                "DELETE FROM memory_watches WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = memory_watches.memory_id)"
-            ))
-            r_annotations = await s.execute(text(
-                "DELETE FROM memory_annotations WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = memory_annotations.memory_id)"
-            ))
-            await s.commit()
-        return {
-            "removed_links": r_links.rowcount,  # type: ignore[union-attr]
-            "removed_watches": r_watches.rowcount,  # type: ignore[union-attr]
-            "removed_annotations": r_annotations.rowcount,  # type: ignore[union-attr]
-            "total_removed": (r_links.rowcount or 0) + (r_watches.rowcount or 0) + (r_annotations.rowcount or 0),  # type: ignore[union-attr]
-        }
-
     async def sample_memories(self, user_id: str, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
         units = await self.list_active(user_id, scope_id, limit=500)
         if len(units) <= count:
@@ -868,109 +761,6 @@ class MemoryStore:
             )
             await s.commit()
 
-
-    # ------------------------------------------------------------------
-    # Memory links
-    # ------------------------------------------------------------------
-
-    async def add_link(self, source_id: str, target_id: str, link_type: str = "related") -> bool:
-        async with self._sm() as s:
-            try:
-                s.add(MemoryLink(source_id=source_id, target_id=target_id, link_type=link_type, created_at=_utc_now_iso()))
-                await s.commit()
-                return True
-            except IntegrityError:
-                await s.rollback()
-                return False
-
-    async def remove_link(self, source_id: str, target_id: str, link_type: str | None = None) -> int:
-        async with self._sm() as s:
-            cond = (MemoryLink.source_id == source_id) & (MemoryLink.target_id == target_id)
-            if link_type:
-                cond = cond & (MemoryLink.link_type == link_type)
-            result = await s.execute(delete(MemoryLink).where(cond))
-            await s.commit()
-        return result.rowcount or 0  # type: ignore[union-attr]
-
-    async def get_links(self, memory_id: str, direction: str = "both") -> list[dict]:
-        results = []
-        async with self._sm() as s:
-            if direction in ("outgoing", "both"):
-                rows = (await s.execute(select(MemoryLink).where(MemoryLink.source_id == memory_id))).scalars().all()
-                results.extend({"source_id": r.source_id, "target_id": r.target_id, "link_type": r.link_type, "direction": "outgoing"} for r in rows)
-            if direction in ("incoming", "both"):
-                rows = (await s.execute(select(MemoryLink).where(MemoryLink.target_id == memory_id))).scalars().all()
-                results.extend({"source_id": r.source_id, "target_id": r.target_id, "link_type": r.link_type, "direction": "incoming"} for r in rows)
-        return results
-
-    async def get_linked_memories(self, memory_id: str, link_type: str | None = None) -> list[MemoryUnit]:
-        links = await self.get_links(memory_id, direction="both")
-        linked_ids = set()
-        for lnk in links:
-            if link_type is None or lnk["link_type"] == link_type:
-                linked_ids.add(lnk["target_id"] if lnk["direction"] == "outgoing" else lnk["source_id"])
-        if not linked_ids:
-            return []
-        units = await self.get_by_ids(list(linked_ids))
-        return [u for u in units if u.status == MemoryStatus.ACTIVE]
-
-    # ------------------------------------------------------------------
-    # Watches
-    # ------------------------------------------------------------------
-
-    async def add_watch(self, memory_id: str, watcher: str) -> bool:
-        async with self._sm() as s:
-            try:
-                s.add(MemoryWatch(memory_id=memory_id, watcher=watcher, created_at=_utc_now_iso()))
-                await s.commit()
-                return True
-            except IntegrityError:
-                await s.rollback()
-                return False
-
-    async def remove_watch(self, memory_id: str, watcher: str) -> bool:
-        async with self._sm() as s:
-            result = await s.execute(
-                delete(MemoryWatch).where((MemoryWatch.memory_id == memory_id) & (MemoryWatch.watcher == watcher))
-            )
-            await s.commit()
-        return (result.rowcount or 0) > 0  # type: ignore[union-attr]
-
-    async def get_watchers(self, memory_id: str) -> list[str]:
-        async with self._sm() as s:
-            rows = (await s.execute(select(MemoryWatch.watcher).where(MemoryWatch.memory_id == memory_id).order_by(MemoryWatch.watcher))).scalars().all()
-        return list(rows)
-
-    async def get_watched_memories(self, watcher: str) -> list[str]:
-        async with self._sm() as s:
-            rows = (await s.execute(select(MemoryWatch.memory_id).where(MemoryWatch.watcher == watcher).order_by(MemoryWatch.memory_id))).scalars().all()
-        return list(rows)
-
-    # ------------------------------------------------------------------
-    # Annotations
-    # ------------------------------------------------------------------
-
-    async def add_annotation(self, memory_id: str, content: str, author: str = "") -> int:
-        async with self._sm() as s:
-            ann = MemoryAnnotation(memory_id=memory_id, author=author, content=content, created_at=_utc_now_iso())
-            s.add(ann)
-            await s.flush()
-            ann_id = ann.annotation_id
-            await s.commit()
-        return ann_id
-
-    async def get_annotations(self, memory_id: str) -> list[dict]:
-        async with self._sm() as s:
-            rows = (await s.execute(
-                select(MemoryAnnotation).where(MemoryAnnotation.memory_id == memory_id).order_by(MemoryAnnotation.created_at)
-            )).scalars().all()
-        return [{"annotation_id": r.annotation_id, "memory_id": r.memory_id, "author": r.author, "content": r.content, "created_at": r.created_at} for r in rows]
-
-    async def delete_annotation(self, annotation_id: int) -> bool:
-        async with self._sm() as s:
-            result = await s.execute(delete(MemoryAnnotation).where(MemoryAnnotation.annotation_id == annotation_id))
-            await s.commit()
-        return (result.rowcount or 0) > 0  # type: ignore[union-attr]
 
     def close(self) -> None:
         pass  # Engine disposal handled in app lifespan.
