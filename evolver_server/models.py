@@ -62,7 +62,7 @@ class AddResponse(BaseModel):
     user_id: str
     scope_id: str | None
     session_id: str
-    units_added: int
+    turns_received: int
 
 
 class MemoryHit(BaseModel):

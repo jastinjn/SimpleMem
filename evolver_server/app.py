@@ -8,9 +8,10 @@ lifespan handler. Tenant isolation is via the ``user_id`` (required) and optiona
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from evolver_server.evolver.db import build_engine, build_sessionmaker
@@ -33,6 +34,8 @@ from .models import (
     StatsRequest,
     StatsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -117,45 +120,56 @@ def health() -> dict:
 
 
 @app.post("/memory/add", response_model=AddResponse)
-async def memory_add(req: AddRequest) -> AddResponse:
+async def memory_add(req: AddRequest, background_tasks: BackgroundTasks) -> AddResponse:
     """Ingest a single dialogue turn into the caller's scope.
 
-    Consolidation runs automatically afterwards (auto_consolidate=True).
+    Returns immediately; extraction and consolidation run in the background.
     """
-    try:
-        added = await _mgr(app).ingest_session_turns(
-            req.session_id,
-            [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
-            user_id=req.user_id,
-            scope_id=req.scope_id,
-        )
-    except Exception as e:  # noqa: BLE001 - surface as 500 for the caller
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    async def _ingest() -> None:
+        try:
+            await _mgr(app).ingest_session_turns(
+                req.session_id,
+                [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
+                user_id=req.user_id,
+                scope_id=req.scope_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Background ingest failed user=%s scope=%s session=%s", req.user_id, req.scope_id, req.session_id)
+
+    background_tasks.add_task(_ingest)
     return AddResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
         session_id=req.session_id,
-        units_added=added,
+        turns_received=1,
     )
 
 
 @app.post("/memory/add_batch", response_model=AddResponse)
-async def memory_add_batch(req: AddBatchRequest) -> AddResponse:
-    """Ingest multiple dialogue turns into the caller's scope (windowed extraction)."""
-    try:
-        added = await _mgr(app).ingest_session_turns(
-            req.session_id,
-            [t.model_dump() for t in req.turns],
-            user_id=req.user_id,
-            scope_id=req.scope_id,
-        )
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e)) from e
+async def memory_add_batch(req: AddBatchRequest, background_tasks: BackgroundTasks) -> AddResponse:
+    """Ingest multiple dialogue turns into the caller's scope.
+
+    Returns immediately; extraction and consolidation run in the background.
+    """
+    turns = [t.model_dump() for t in req.turns]
+
+    async def _ingest() -> None:
+        try:
+            await _mgr(app).ingest_session_turns(
+                req.session_id,
+                turns,
+                user_id=req.user_id,
+                scope_id=req.scope_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Background ingest failed user=%s scope=%s session=%s", req.user_id, req.scope_id, req.session_id)
+
+    background_tasks.add_task(_ingest)
     return AddResponse(
         user_id=req.user_id,
         scope_id=req.scope_id,
         session_id=req.session_id,
-        units_added=added,
+        turns_received=len(req.turns),
     )
 
 

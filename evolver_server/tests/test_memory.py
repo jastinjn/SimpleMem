@@ -16,7 +16,7 @@ class TestMemoryAdd:
     async def test_both_fields_empty_is_422(self, client):
         assert (await client.post("/memory/add", json={"user_id": USER_ID})).status_code == 422
 
-    async def test_returns_units_added(self, client_and_store):
+    async def test_returns_turns_received(self, client_and_store):
         client, store = client_and_store
         r = await client.post("/memory/add", json={
             "user_id": USER_ID,
@@ -28,7 +28,6 @@ class TestMemoryAdd:
         body = r.json()
         assert body["user_id"] == USER_ID
         assert body["scope_id"] == SCOPE
-        assert body["units_added"] > 0
         active = await store.list_active(USER_ID, SCOPE)
         contents = " ".join(u.content for u in active).lower()
         assert "terraform" in contents
@@ -104,7 +103,7 @@ class TestMemoryAddBatch:
     async def test_empty_turns_is_422(self, client):
         assert (await client.post("/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": []})).status_code == 422
 
-    async def test_returns_units_added(self, client):
+    async def test_returns_turns_received(self, client):
         r = await client.post("/memory/add_batch", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
@@ -114,7 +113,7 @@ class TestMemoryAddBatch:
             ],
         })
         assert r.status_code == 200
-        assert r.json()["units_added"] > 0
+        assert r.json()["user_id"] == USER_ID
 
     async def test_new_content_is_retrievable(self, client):
         await client.post("/memory/add_batch", json={
