@@ -9,6 +9,7 @@ from collections.abc import Callable
 from .config import EvolveMemConfig
 from .consolidator import MemoryConsolidator
 from .embeddings import BaseEmbedder, create_embedder
+from .llm_extractor import LLMMemoryExtractor
 from .metrics import summarize_memory_store
 from .models import MemoryQuery, MemoryStatus, MemoryType, MemoryUnit, utc_now_iso
 from .policy import MemoryPolicy
@@ -42,6 +43,8 @@ class MemoryManager:
         embedding_mode: str = "hashing",
         embedding_model: str = "all-MiniLM-L6-v2",
         embedder: BaseEmbedder | None = None,
+        ingestion_mode: str = "pattern",
+        llm_extractor: LLMMemoryExtractor | None = None,
     ):
         self.store = store
         self.policy = policy or MemoryPolicy()
@@ -49,6 +52,8 @@ class MemoryManager:
         self.scope_id = scope_id
         self.auto_consolidate = auto_consolidate
         self.retrieval_mode = retrieval_mode
+        self.ingestion_mode = ingestion_mode
+        self.llm_extractor = llm_extractor
         self.use_embeddings = use_embeddings or retrieval_mode in {"embedding", "hybrid"}
         self.policy_store = policy_store
         self.telemetry_store = telemetry_store
@@ -150,37 +155,52 @@ class MemoryManager:
         user_id: str | None = None,
         scope_id: str | None = None,
     ) -> int:
-        """Create simple phase-1 memory units from a completed session."""
+        """Create memory units from a completed session.
+
+        Branches on the manager's ``ingestion_mode``: ``"llm"`` sends windows of the
+        session to an LLM via ``self.llm_extractor``; ``"pattern"`` (default) uses
+        per-turn regex/keyword extraction. Everything after (working summary, dedup,
+        conflict detection, embedding, store, consolidation, telemetry) is shared.
+        """
         uid = user_id or self.user_id
         scope = scope_id or self.scope_id
+        mode = self.ingestion_mode
         units: list[MemoryUnit] = []
 
-        async def _extract_turn(idx: int, turn: dict) -> list[MemoryUnit]:
-            prompt_text = str(turn.get("prompt_text", "") or "").strip()
-            response_text = str(turn.get("response_text", "") or "").strip()
-            if not prompt_text and not response_text:
-                return []
-            extracted = await _extract_memory_units_for_turn(
+        if mode == "llm" and self.llm_extractor:
+            units = await self.llm_extractor.extract_session(
+                turns=turns,
                 user_id=uid,
                 scope_id=scope,
                 session_id=session_id,
-                turn_index=idx,
-                prompt_text=prompt_text,
-                response_text=response_text,
             )
-            if extracted:
-                logger.info(
-                    "[Memory] extract turn=%d/%d → %d units [%s]",
-                    idx, len(turns), len(extracted),
-                    ", ".join(u.memory_type.value for u in extracted),
+        else:
+            async def _extract_turn(idx: int, turn: dict) -> list[MemoryUnit]:
+                prompt_text = str(turn.get("prompt_text", "") or "").strip()
+                response_text = str(turn.get("response_text", "") or "").strip()
+                if not prompt_text and not response_text:
+                    return []
+                extracted = await _extract_memory_units_for_turn(
+                    user_id=uid,
+                    scope_id=scope,
+                    session_id=session_id,
+                    turn_index=idx,
+                    prompt_text=prompt_text,
+                    response_text=response_text,
                 )
-            return extracted
+                if extracted:
+                    logger.info(
+                        "[Memory] extract turn=%d/%d → %d units [%s]",
+                        idx, len(turns), len(extracted),
+                        ", ".join(u.memory_type.value for u in extracted),
+                    )
+                return extracted
 
-        results = await asyncio.gather(
-            *(_extract_turn(idx, turn) for idx, turn in enumerate(turns, start=1))
-        )
-        for extracted in results:
-            units.extend(extracted)
+            results = await asyncio.gather(
+                *(_extract_turn(idx, turn) for idx, turn in enumerate(turns, start=1))
+            )
+            for extracted in results:
+                units.extend(extracted)
 
         # Stamp user_id on all extracted units.
         for u in units:
@@ -4475,8 +4495,6 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
     if "remember that" in text or "keep in mind" in text or "note that" in text:
         return MemoryType.SEMANTIC
     return MemoryType.EPISODIC
-
-
 
 
 async def _extract_memory_units_for_turn(

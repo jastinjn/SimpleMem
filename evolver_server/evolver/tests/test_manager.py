@@ -33,6 +33,8 @@ def _manager(
     embedder=None,
     user_id: str = UID,
     scope_id: str = "test",
+    ingestion_mode: str = "pattern",
+    llm_extractor=None,
 ) -> MemoryManager:
     policy = MemoryPolicy(recency_weight=0.0)
     return MemoryManager(
@@ -45,6 +47,8 @@ def _manager(
         policy_store=None,
         telemetry_store=None,
         embedder=embedder,
+        ingestion_mode=ingestion_mode,
+        llm_extractor=llm_extractor,
     )
 
 
@@ -232,6 +236,39 @@ class TestIngestSessionTurns:
         active = await store.list_active(UID, "test")
         non_ws = [u for u in active if u.memory_type != MemoryType.WORKING_SUMMARY]
         assert all(len(u.embedding) == DIM for u in non_ws if u.embedding)
+
+
+# ---------------------------------------------------------------------------
+# ingest_session_turns — LLM ingestion mode
+# ---------------------------------------------------------------------------
+
+class TestIngestSessionTurnsLLMMode:
+    async def test_llm_path_creates_memory_units(self, store, monkeypatch, fake_uuid):
+        _patch_time(monkeypatch)
+        from unittest.mock import AsyncMock
+
+        llm_unit = _make_unit(
+            scope_id="test",
+            memory_type=MemoryType.SEMANTIC,
+            content="A fact extracted by the LLM ingestion path",
+            summary="",
+            updated_at="2025-01-01T00:00:01+00:00",
+        )
+        llm_extractor = AsyncMock()
+        llm_extractor.extract_session = AsyncMock(return_value=[llm_unit])
+
+        mgr = _manager(store, ingestion_mode="llm", llm_extractor=llm_extractor)
+        added = await mgr.ingest_session_turns("sess-llm", SAMPLE_TURNS)
+
+        llm_extractor.extract_session.assert_awaited_once_with(
+            turns=SAMPLE_TURNS,
+            user_id=UID,
+            scope_id="test",
+            session_id="sess-llm",
+        )
+        assert added > 0
+        contents = {u.content for u in await store.list_active(UID, "test")}
+        assert "A fact extracted by the LLM ingestion path" in contents
 
 
 # ---------------------------------------------------------------------------

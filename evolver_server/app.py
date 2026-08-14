@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from evolver_server.evolver.db import build_engine, build_sessionmaker
 from evolver_server.evolver.embeddings import create_embedder
+from evolver_server.evolver.llm_extractor import create_llm_extractor
 from evolver_server.evolver.manager import MemoryManager
 from evolver_server.evolver.models import MemoryQuery
 from evolver_server.evolver.store import MemoryStore
@@ -48,18 +49,29 @@ async def lifespan(app: FastAPI):
 
     store = MemoryStore(sm)
     embedder = create_embedder(mode=settings.embedder_mode, dimensions=settings.embedding_dim)
+
+    llm_extractor = None
+    if settings.ingestion_mode == "llm":
+        llm_extractor = create_llm_extractor(settings)
+        if llm_extractor is None:
+            raise RuntimeError(
+                "ingestion_mode=llm requires OPENAI_API_KEY to be set in .env"
+            )
+
     mgr = MemoryManager(
         store=store,
         retrieval_mode=settings.retrieval_mode,
         auto_consolidate=True,
         embedder=embedder,
+        ingestion_mode=settings.ingestion_mode,
+        llm_extractor=llm_extractor,
     )
     app.state.store = store
     app.state.mgr = mgr
     print(
         f"[EvolverAPI] ready — db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
-        f"auto_consolidate=True"
+        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True"
     )
     yield
     await engine.dispose()

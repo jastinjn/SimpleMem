@@ -19,7 +19,6 @@ class AddRequest(BaseModel):
     session_id: str = Field("api", description="Groups turns from the same conversation")
     prompt_text: str = Field("", description="User side of the turn")
     response_text: str = Field("", description="Assistant side of the turn")
-
     @model_validator(mode="after")
     def _at_least_one_side(self) -> "AddRequest":
         if not self.prompt_text.strip() and not self.response_text.strip():
