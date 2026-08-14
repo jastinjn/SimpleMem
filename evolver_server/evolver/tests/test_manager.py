@@ -177,6 +177,33 @@ class TestIngestSessionTurns:
         assert (await store.get_stats(UID, "custom_scope"))["active"] > 0
         assert (await store.get_stats(UID, "default"))["active"] == 0
 
+    async def test_local_conflict_drops_earlier_turn_unit(self, store, monkeypatch, fake_uuid):
+        _patch_time(monkeypatch)
+        mgr = _manager(store)
+        # Turn 1 and turn 3 both match the PREFERENCE pattern "I prefer ...".
+        # They share identical topics so Jaccard = 1.0 > threshold, but have
+        # different content — a genuine within-session contradiction. The earlier
+        # unit (turn 1) should be dropped; only the later one (turn 3) persists.
+        turns = [
+            {
+                "prompt_text": "I prefer giving feedback marks for marking student work",
+                "response_text": "",
+            },
+            {
+                "prompt_text": "Some unrelated content about today's class",
+                "response_text": "",
+            },
+            {
+                "prompt_text": "I prefer not giving feedback marks for marking student work",
+                "response_text": "",
+            },
+        ]
+        await mgr.ingest_session_turns("sess-conflict", turns)
+        active = await store.list_active(UID, "test")
+        preference_units = [u for u in active if u.memory_type == MemoryType.PREFERENCE]
+        assert len(preference_units) == 1
+        assert "not giving" in preference_units[0].content
+
 
 # ---------------------------------------------------------------------------
 # retrieve_for_prompt

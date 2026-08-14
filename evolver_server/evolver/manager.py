@@ -220,6 +220,16 @@ class MemoryManager:
                 pre_validate_count - pre_dedup_count, dedup_skipped, len(units),
             )
 
+        # Drop earlier units that contradict later units from the same session.
+        local_conflicts = _detect_local_conflicts(units)
+        if local_conflicts:
+            drop_local = {c["earlier_id"] for c in local_conflicts}
+            units = [u for u in units if u.memory_id not in drop_local]
+            logger.info(
+                "[Memory] local conflicts: dropped %d earlier units superseded within session",
+                len(drop_local),
+            )
+
         # Detect potential conflicts with existing memories.
         conflicts = await _detect_conflicts(units, self.store, uid, scope)
         if conflicts:
@@ -577,19 +587,9 @@ class MemoryManager:
         conflicts: list[dict] = []
         seen: set[tuple[str, str]] = set()
         for i, a in enumerate(units):
-            a_terms = set(t.lower() for t in a.topics + a.entities)
-            if not a_terms:
-                continue
             for b in units[i + 1:]:
-                if a.memory_type != b.memory_type:
-                    continue
-                b_terms = set(t.lower() for t in b.topics + b.entities)
-                if not b_terms:
-                    continue
-                overlap = len(a_terms & b_terms) / float(len(a_terms | b_terms))
-                if overlap < 0.65:
-                    continue
-                if a.content.strip().lower() == b.content.strip().lower():
+                overlap = _jaccard_conflict(a, b)
+                if overlap is None:
                     continue
                 pair_key = (min(a.memory_id, b.memory_id), max(a.memory_id, b.memory_id))
                 if pair_key in seen:
@@ -599,7 +599,7 @@ class MemoryManager:
                     "id_a": a.memory_id,
                     "id_b": b.memory_id,
                     "type": a.memory_type.value,
-                    "overlap": round(overlap, 4),
+                    "overlap": overlap,
                     "content_a": a.content[:120],
                     "content_b": b.content[:120],
                 })
@@ -4842,6 +4842,61 @@ def _enforce_type_diversity(
     return primary + overflow
 
 
+def _jaccard_conflict(
+    a: MemoryUnit,
+    b: MemoryUnit,
+    threshold: float = 0.65,
+) -> float | None:
+    """Return Jaccard overlap if a and b genuinely conflict, else None."""
+    if a.memory_type != b.memory_type:
+        return None
+    a_terms = set(t.lower() for t in a.topics + a.entities)
+    b_terms = set(t.lower() for t in b.topics + b.entities)
+    if not a_terms or not b_terms:
+        return None
+    overlap = len(a_terms & b_terms) / float(len(a_terms | b_terms))
+    if overlap < threshold:
+        return None
+    if a.content.strip().lower() == b.content.strip().lower():
+        return None
+    return round(overlap, 4)
+
+
+def _detect_local_conflicts(
+    units: list[MemoryUnit],
+    threshold: float = 0.65,
+) -> list[dict]:
+    """Find conflicts within a batch of not-yet-persisted units.
+
+    Compares units pairwise. The unit from the earlier turn
+    (lower source_turn_start) is labelled 'earlier' and should be dropped.
+    """
+    conflicts = []
+    seen: set[tuple[str, str]] = set()
+    for i, a in enumerate(units):
+        for b in units[i + 1:]:
+            overlap = _jaccard_conflict(a, b, threshold)
+            if overlap is None:
+                continue
+            if a.source_turn_start <= b.source_turn_start:
+                earlier, later = a, b
+            else:
+                earlier, later = b, a
+            pair_key = (earlier.memory_id, later.memory_id)
+            if pair_key in seen:
+                continue
+            seen.add(pair_key)
+            conflicts.append({
+                "earlier_id": earlier.memory_id,
+                "later_id": later.memory_id,
+                "type": a.memory_type.value,
+                "overlap": overlap,
+                "earlier_content": earlier.content[:120],
+                "later_content": later.content[:120],
+            })
+    return conflicts
+
+
 async def _detect_conflicts(
     new_units: list[MemoryUnit],
     store: MemoryStore,
@@ -4861,30 +4916,15 @@ async def _detect_conflicts(
 
     conflicts: list[dict] = []
     for new_unit in new_units:
-        new_terms = set(
-            t.lower() for t in new_unit.topics + new_unit.entities
-        )
-        if not new_terms:
-            continue
         for old_unit in existing:
-            if old_unit.memory_type != new_unit.memory_type:
-                continue
-            old_terms = set(
-                t.lower() for t in old_unit.topics + old_unit.entities
-            )
-            if not old_terms:
-                continue
-            overlap = len(new_terms & old_terms) / float(len(new_terms | old_terms))
-            if overlap < similarity_threshold:
-                continue
-            # Check that content is actually different (not a duplicate).
-            if new_unit.content.strip().lower() == old_unit.content.strip().lower():
+            overlap = _jaccard_conflict(new_unit, old_unit, similarity_threshold)
+            if overlap is None:
                 continue
             conflicts.append({
                 "new_id": new_unit.memory_id,
                 "existing_id": old_unit.memory_id,
                 "type": new_unit.memory_type.value,
-                "overlap": round(overlap, 4),
+                "overlap": overlap,
                 "new_content": new_unit.content[:120],
                 "existing_content": old_unit.content[:120],
             })
