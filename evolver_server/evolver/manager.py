@@ -56,11 +56,7 @@ class MemoryManager:
         if embedder is not None:
             self.embedder = embedder
         elif self.use_embeddings:
-            self.embedder = create_embedder(
-                mode=embedding_mode,
-                model_name=embedding_model,
-                fallback=True,
-            )
+            self.embedder = create_embedder(mode=embedding_mode)
         else:
             self.embedder = None
         self.policy_optimizer = MemoryPolicyOptimizer(
@@ -4366,11 +4362,7 @@ class MemoryManager:
         self.retrieval_mode = proposed.retrieval_mode
         self.use_embeddings = self.use_embeddings or proposed.retrieval_mode in {"embedding", "hybrid"}
         if self.use_embeddings and self.embedder is None:
-            self.embedder = create_embedder(
-                mode=self.embedding_mode,
-                model_name=self.embedding_model,
-                fallback=True,
-            )
+            self.embedder = create_embedder(mode=self.embedding_mode)
         self.retriever = MemoryRetriever(
             store=self.store,
             policy=self.policy,

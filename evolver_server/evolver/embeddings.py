@@ -118,36 +118,62 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         return [e.tolist() for e in embeddings]
 
 
-def create_embedder(
-    mode: str = "hashing",
-    model_name: str = "all-MiniLM-L6-v2",
-    dimensions: int = 64,
-    fallback: bool = True,
-) -> BaseEmbedder:
-    """Factory function to create an embedder.
+class OpenAIEmbedder(BaseEmbedder):
+    """Embedder using OpenAI text-embedding models (text-embedding-3-small/large).
+
+    Uses the synchronous OpenAI client. The ``dimensions`` parameter is passed
+    to the API so output size matches the configured pgvector column width.
+    Note: ``dimensions`` truncation is only supported by text-embedding-3-* models,
+    not text-embedding-ada-002.
+
+    Reads OPENAI_API_KEY and OPENAI_EMBEDDING_MODEL from settings automatically.
+    """
+
+    def __init__(self, dimensions: int = 1024):
+        from ..config import get_settings
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError(
+                "openai package not installed. Install with: pip install openai"
+            )
+        s = get_settings()
+        self._client = OpenAI(api_key=s.OPENAI_API_KEY)
+        self._model = s.OPENAI_EMBEDDING_MODEL
+        self._dimensions = dimensions
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def encode(self, text: str) -> list[float]:
+        response = self._client.embeddings.create(
+            input=text,
+            model=self._model,
+            dimensions=self._dimensions,
+        )
+        return response.data[0].embedding
+
+    def encode_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = self._client.embeddings.create(
+            input=texts,
+            model=self._model,
+            dimensions=self._dimensions,
+        )
+        return [d.embedding for d in sorted(response.data, key=lambda x: x.index)]
+
+
+def create_embedder(mode: str = "hashing", dimensions: int = 1024) -> BaseEmbedder:
+    """Create an embedder by mode.
 
     Args:
-        mode: "hashing" for HashingEmbedder, "semantic" for SentenceTransformerEmbedder.
-        model_name: Model name for semantic mode.
-        dimensions: Vector dimensions for hashing mode.
-        fallback: If True and semantic mode fails to load, fall back to HashingEmbedder.
-
-    Returns:
-        An embedder instance.
+        mode: "hashing" for HashingEmbedder, "semantic" for OpenAIEmbedder.
+        dimensions: Output vector size (passed to both embedder types).
     """
     if mode == "semantic":
-        embedder = SentenceTransformerEmbedder(model_name=model_name)
-        if embedder.is_available:
-            return embedder
-        if fallback:
-            logger.warning(
-                "Semantic embedder not available, falling back to HashingEmbedder"
-            )
-            return HashingEmbedder(dimensions=dimensions)
-        raise RuntimeError(
-            "Semantic embedder not available and fallback disabled. "
-            "Install sentence-transformers: pip install sentence-transformers"
-        )
+        return OpenAIEmbedder(dimensions=dimensions)
     return HashingEmbedder(dimensions=dimensions)
 
 

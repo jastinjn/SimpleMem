@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from evolver_server.evolver.db import build_engine, build_sessionmaker
+from evolver_server.evolver.embeddings import create_embedder
 from evolver_server.evolver.manager import MemoryManager
 from evolver_server.evolver.models import MemoryQuery
 from evolver_server.evolver.store import MemoryStore
@@ -42,17 +43,23 @@ async def lifespan(app: FastAPI):
         max_overflow=settings.db_max_overflow,
     )
     sm = build_sessionmaker(engine)
+    if settings.embedder_mode == "semantic" and not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY must be set in .env when embedder_mode=semantic")
+
     store = MemoryStore(sm)
+    embedder = create_embedder(mode=settings.embedder_mode, dimensions=settings.embedding_dim)
     mgr = MemoryManager(
         store=store,
         retrieval_mode=settings.retrieval_mode,
         auto_consolidate=True,
+        embedder=embedder,
     )
     app.state.store = store
     app.state.mgr = mgr
     print(
         f"[EvolverAPI] ready — db={settings.DATABASE_URL!r} "
-        f"retrieval_mode={settings.retrieval_mode} auto_consolidate=True"
+        f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
+        f"auto_consolidate=True"
     )
     yield
     await engine.dispose()

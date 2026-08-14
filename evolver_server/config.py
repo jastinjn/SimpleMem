@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
     retrieval_mode: str = "hybrid"
+    embedder_mode: str = "semantic"
     default_top_k: int = 10
     cors_allowed_origins: str = "*"
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

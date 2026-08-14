@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.embeddings import HashingEmbedder
+from evolver_server.evolver.embeddings import HashingEmbedder, OpenAIEmbedder
 from evolver_server.evolver.manager import MemoryManager
 from evolver_server.evolver.models import MemoryType
 from evolver_server.evolver.policy import MemoryPolicy
@@ -203,6 +203,35 @@ class TestIngestSessionTurns:
         preference_units = [u for u in active if u.memory_type == MemoryType.PREFERENCE]
         assert len(preference_units) == 1
         assert "not giving" in preference_units[0].content
+
+    async def test_openai_embedder_called_during_ingestion(self, store, monkeypatch, fake_uuid):
+        _patch_time(monkeypatch)
+        from unittest.mock import MagicMock
+
+        # Use 64 dimensions to match the test DB schema (vector(64))
+        DIM = 64
+        fake_emb = MagicMock()
+        fake_emb.embedding = [0.1] * DIM
+        fake_emb.index = 0
+        fake_response = MagicMock()
+        fake_response.data = [fake_emb]
+        mock_client = MagicMock()
+        mock_client.embeddings.create.return_value = fake_response
+
+        monkeypatch.setattr("openai.OpenAI", MagicMock(return_value=mock_client))
+        fake_settings = MagicMock()
+        fake_settings.OPENAI_API_KEY = "sk-test"
+        fake_settings.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+        monkeypatch.setattr("evolver_server.config.get_settings", lambda: fake_settings)
+
+        embedder = OpenAIEmbedder(dimensions=DIM)
+        mgr = _manager(store, embedder=embedder)
+        await mgr.ingest_session_turns("sess-openai", SAMPLE_TURNS)
+
+        assert mock_client.embeddings.create.called
+        active = await store.list_active(UID, "test")
+        non_ws = [u for u in active if u.memory_type != MemoryType.WORKING_SUMMARY]
+        assert all(len(u.embedding) == DIM for u in non_ws if u.embedding)
 
 
 # ---------------------------------------------------------------------------
