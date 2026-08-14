@@ -4421,30 +4421,15 @@ def _extract_entities(text: str) -> list[str]:
     entities = []
     seen = set()
 
-    # Capitalized words (proper nouns, class names).
     for token in text.split():
         cleaned = token.strip(".,:;!?()[]{}")
         if len(cleaned) > 1 and cleaned[:1].isupper() and cleaned not in seen:
             entities.append(cleaned)
             seen.add(cleaned)
-        if len(entities) >= 10:
+        if len(entities) >= 12:
             break
 
-    # CamelCase and PascalCase identifiers.
-    for match in re.finditer(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", text):
-        ident = match.group(1)
-        if ident not in seen and len(entities) < 12:
-            entities.append(ident)
-            seen.add(ident)
-
-    # snake_case identifiers (likely code references).
-    for match in re.finditer(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+){2,})\b", text):
-        ident = match.group(1)
-        if ident not in seen and len(entities) < 12:
-            entities.append(ident)
-            seen.add(ident)
-
-    return entities[:12]
+    return entities
 
 
 def _summarize_turn(prompt_text: str, response_text: str) -> str:
