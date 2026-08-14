@@ -10,8 +10,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from marklymem.evolver.embeddings import HashingEmbedder, OpenAIEmbedder
@@ -96,7 +94,6 @@ class TestIngestSessionTurns:
         _patch_time(monkeypatch)
         mgr = _manager(store)
         first = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        await mgr.clear_cache()
         second = await mgr.ingest_session_turns("sess-002", SAMPLE_TURNS)
         assert second["added"] <= first["added"]
 
@@ -231,101 +228,6 @@ class TestIngestSessionTurnsLLMMode:
         assert result["added"] > 0
         contents = {u.content for u in await store.list_active(UID, "test")}
         assert "A fact extracted by the LLM ingestion path" in contents
-
-
-# ---------------------------------------------------------------------------
-# retrieve_for_prompt
-# ---------------------------------------------------------------------------
-
-class TestRetrieveForPrompt:
-    async def _ingest(self, mgr):
-        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-
-    async def test_returns_matching_units(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await self._ingest(mgr)
-        units = await mgr.retrieve_for_prompt("PostgreSQL database")
-        assert len(units) > 0
-        contents = " ".join(u.content for u in units)
-        assert "PostgreSQL" in contents or "database" in contents.lower()
-
-    async def test_no_match_returns_empty(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await self._ingest(mgr)
-        units = await mgr.retrieve_for_prompt("xyzzy_totally_unrelated_term")
-        assert units == []
-
-    async def test_cache_hit_on_repeated_call(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await self._ingest(mgr)
-        await mgr.retrieve_for_prompt("PostgreSQL database")
-        hits_before = mgr._cache_hits
-        await mgr.retrieve_for_prompt("PostgreSQL database")
-        assert mgr._cache_hits > hits_before
-
-    async def test_mark_accessed_increments_access_count(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        await self._ingest(mgr)
-        retrieved = await mgr.retrieve_for_prompt("PostgreSQL database")
-        if not retrieved:
-            pytest.skip("No units retrieved; query mismatch")
-        mid = retrieved[0].memory_id
-        fetched = await store.get_by_ids([mid])
-        assert fetched[0].access_count >= 1
-
-    async def test_importance_auto_boost_on_high_access_count(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        u = _make_unit(
-            memory_id="freq-001", scope_id="test",
-            content="PostgreSQL is the primary database system",
-            importance=0.5,
-            access_count=3,
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([u])
-        await mgr.retrieve_for_prompt("PostgreSQL")
-        fetched = await store.get_by_ids(["freq-001"])
-        assert fetched[0].importance == pytest.approx(0.52, abs=1e-4)
-
-    async def test_importance_boost_capped_at_0_9(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store)
-        u = _make_unit(
-            memory_id="cap-001", scope_id="test",
-            content="PostgreSQL is the primary database system",
-            importance=0.89,
-            access_count=3,
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([u])
-        await mgr.retrieve_for_prompt("PostgreSQL")
-        fetched = await store.get_by_ids(["cap-001"])
-        assert fetched[0].importance <= 0.9
-
-    async def test_token_budget_limits_results(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        policy = MemoryPolicy(recency_weight=0.0, max_injected_units=10, max_injected_tokens=5)
-        mgr = MemoryManager(
-            store=store, policy=policy, user_id=UID, scope_id="test",
-            auto_consolidate=False,
-        )
-        await self._ingest(mgr)
-        units = await mgr.retrieve_for_prompt("PostgreSQL database")
-        assert len(units) <= 1
-
-    async def test_scope_argument_overrides_default(self, store, monkeypatch, fake_uuid):
-        _patch_time(monkeypatch)
-        mgr = _manager(store, scope_id="default")
-        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, user_id=UID, scope_id="other_scope")
-        units = await mgr.retrieve_for_prompt("PostgreSQL", scope_id="other_scope")
-        assert len(units) > 0
-        units_default = await mgr.retrieve_for_prompt("PostgreSQL", scope_id="default")
-        assert units_default == []
 
 
 # ---------------------------------------------------------------------------

@@ -66,8 +66,6 @@ class MemoryManager:
             embedder=self.embedder,
         )
         self.consolidator = MemoryConsolidator(store=self.store)
-        self._retrieval_cache: dict[str, list[MemoryUnit]] = {}
-        self._cache_max_size = 16
         self._event_callbacks: list[Callable] = []
 
     def register_event_callback(self, callback: Callable) -> None:
@@ -208,7 +206,6 @@ class MemoryManager:
 
         added = await self.store.add_memories(units)
 
-        await self.clear_cache()
         consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:
             with telemetry.span("consolidate") as cons_span:
@@ -234,88 +231,6 @@ class MemoryManager:
             "decayed": consolidation_result.get("decayed", 0),
             "reinforced": consolidation_result.get("reinforced", 0),
         }
-
-    async def retrieve_for_prompt(
-        self,
-        task_description: str,
-        scope_id: str | None = None,
-        expand_links: bool = False,
-    ) -> list[MemoryUnit]:
-        effective_scope = scope_id or self.scope_id
-        cache_key = f"{effective_scope}::{task_description}::{'linked' if expand_links else 'plain'}"
-        if cache_key in self._retrieval_cache:
-            self._cache_hits += 1
-            logger.info(
-                "[Memory] retrieve cache HIT (hits=%d misses=%d)",
-                self._cache_hits, self._cache_misses,
-            )
-            return self._retrieval_cache[cache_key]
-        self._cache_misses += 1
-
-        query = MemoryQuery(
-            user_id=self.user_id,
-            scope_id=effective_scope,
-            query_text=task_description,
-            top_k=self.policy.max_injected_units,
-            max_tokens=self.policy.max_injected_tokens,
-        )
-        hits = await self.retriever.retrieve(query)
-        hit_units = [h.unit for h in hits]
-        # Optionally expand with linked memories from the graph.
-        if expand_links and hit_units:
-            seen_ids = {u.memory_id for u in hit_units}
-            linked_extras: list[MemoryUnit] = []
-            for u in hit_units[:5]:  # Limit expansion to top-5 to stay lightweight.
-                linked = await self.store.get_linked_memories(u.memory_id)
-                for lu in linked:
-                    if lu.memory_id not in seen_ids:
-                        linked_extras.append(lu)
-                        seen_ids.add(lu.memory_id)
-            hit_units.extend(linked_extras)
-        units = self._fit_token_budget(hit_units, query.max_tokens)
-        # Log retrieval results.
-        if units:
-            type_summary = {}
-            for u in units:
-                type_summary[u.memory_type.value] = type_summary.get(u.memory_type.value, 0) + 1
-            score_strs = [f"{h.score:.3f}" for h in hits[:len(units)]]
-            rendered_for_log = await self.render_for_prompt(units)
-            logger.info(
-                "[Memory] retrieve scope=%s mode=%s → %d/%d units, tokens≈%d, types=%s, scores=[%s], query=%s",
-                effective_scope,
-                self.retrieval_mode,
-                len(units),
-                len(hits),
-                estimate_tokens(rendered_for_log),
-                type_summary,
-                ", ".join(score_strs),
-                task_description[:80],
-            )
-            await self.store.mark_accessed([u.memory_id for u in units], accessed_at=utc_now_iso())
-            # Auto-boost importance for frequently accessed memories.
-            for u in units:
-                if u.access_count >= 3 and u.importance < 0.9:
-                    new_importance = min(0.9, u.importance + 0.02)
-                    await self.store.update_importance(u.memory_id, round(new_importance, 4), utc_now_iso())
-        else:
-            logger.info(
-                "[Memory] retrieve scope=%s mode=%s → 0 hits, query=%s",
-                effective_scope, self.retrieval_mode, task_description[:80],
-            )
-        # Cache results for repeated queries within the same session.
-        if len(self._retrieval_cache) >= self._cache_max_size:
-            # Evict oldest entry.
-            oldest = next(iter(self._retrieval_cache))
-            del self._retrieval_cache[oldest]
-        self._retrieval_cache[cache_key] = units
-        return units
-
-    _cache_hits: int = 0
-    _cache_misses: int = 0
-
-    async def clear_cache(self) -> None:
-        """Clear the retrieval cache (e.g., after ingestion)."""
-        self._retrieval_cache.clear()
 
     async def render_for_prompt(self, units: list[MemoryUnit], include_pool_context: bool = False) -> str:
         if not units:
@@ -406,10 +321,6 @@ class MemoryManager:
             else:
                 age_buckets["older"] += 1
 
-        # Cache stats.
-        total_cache = self._cache_hits + self._cache_misses
-        cache_hit_rate = round(self._cache_hits / max(total_cache, 1), 4)
-
         # TTL statistics.
         ttl_set = sum(1 for u in units if u.expires_at)
         ttl_expiring_soon = 0
@@ -444,11 +355,6 @@ class MemoryManager:
             "access": {
                 "avg_access_count": access.get("avg_access_count", 0.0),
                 "never_accessed": access.get("never_accessed", 0),
-            },
-            "cache": {
-                "hits": self._cache_hits,
-                "misses": self._cache_misses,
-                "hit_rate": cache_hit_rate,
             },
             "ttl": {
                 "memories_with_ttl": ttl_set,
@@ -534,8 +440,6 @@ class MemoryManager:
     async def update_memory(self, memory_id: str, content: str) -> bool:
         """Update the content of an existing memory."""
         result = await self.store.update_content(memory_id, content)
-        if result:
-            await self.clear_cache()
         return result
 
     async def get_memory(self, memory_id: str) -> MemoryUnit | None:
@@ -550,8 +454,6 @@ class MemoryManager:
             expires_at: ISO-8601 expiry timestamp, or empty string to clear.
         """
         result = await self.store.set_ttl(memory_id, expires_at)
-        if result:
-            await self.clear_cache()
         return result
 
     async def expire_stale(self, scope_id: str | None = None) -> int:
@@ -559,7 +461,6 @@ class MemoryManager:
         scope = scope_id or self.scope_id
         count = await self.store.expire_stale(self.user_id, scope)
         if count:
-            await self.clear_cache()
             self._notify("expire", scope_id=scope, expired_count=count)
         return count
 
@@ -570,7 +471,6 @@ class MemoryManager:
         """
         new_id = await self.store.share_to_scope(memory_id, target_scope_id)
         if new_id:
-            await self.clear_cache()
             self._notify("share", memory_id=memory_id, target_scope_id=target_scope_id, new_id=new_id)
         return new_id
 
@@ -583,8 +483,6 @@ class MemoryManager:
         """Import memories from JSON dicts into the store."""
         scope = target_scope_id or self.scope_id
         count = await self.store.import_memories_json(self.user_id, data, scope)
-        if count:
-            await self.clear_cache()
         return count
 
     async def set_type_ttl(
@@ -596,15 +494,12 @@ class MemoryManager:
         """Set TTL on all active memories of a given type."""
         scope = scope_id or self.scope_id
         count = await self.store.set_type_ttl(self.user_id, scope, memory_type, expires_at)
-        if count:
-            await self.clear_cache()
         return count
 
     async def merge_memories(self, id_a: str, id_b: str, merged_content: str) -> str | None:
         """Merge two memories into a new one, superseding both."""
         new_id = await self.store.merge_memories(id_a, id_b, merged_content)
         if new_id:
-            await self.clear_cache()
             self._notify("merge", id_a=id_a, id_b=id_b, new_id=new_id)
         return new_id
 
@@ -620,15 +515,11 @@ class MemoryManager:
     async def add_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Add user-defined tags to a memory."""
         result = await self.store.add_tags(memory_id, tags)
-        if result:
-            await self.clear_cache()
         return result
 
     async def remove_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Remove tags from a memory."""
         result = await self.store.remove_tags(memory_id, tags)
-        if result:
-            await self.clear_cache()
         return result
 
     async def search_by_tag(self, tag: str, scope_id: str | None = None, limit: int = 50) -> list[MemoryUnit]:
@@ -639,8 +530,6 @@ class MemoryManager:
     async def bulk_archive(self, memory_ids: list[str]) -> int:
         """Archive multiple memories at once."""
         count = await self.store.bulk_archive(memory_ids)
-        if count:
-            await self.clear_cache()
         return count
 
     async def snapshot_scope(self, scope_id: str | None = None) -> dict:
@@ -651,8 +540,6 @@ class MemoryManager:
     async def restore_snapshot(self, snapshot: dict) -> int:
         """Restore a scope from a previous snapshot."""
         count = await self.store.restore_snapshot(self.user_id, snapshot)
-        if count:
-            await self.clear_cache()
         return count
 
     async def get_event_log(self, scope_id: str | None = None, limit: int = 50) -> list[dict]:
@@ -735,8 +622,6 @@ class MemoryManager:
                 await self.store.supersede(b.memory_id, a.memory_id, now)
             resolved += 1
 
-        if resolved:
-            await self.clear_cache()
         result = {"resolved": resolved, "total_conflicts": len(conflicts)}
         self._notify("conflict_resolution", scope_id=scope, **result)
         return result
@@ -775,22 +660,16 @@ class MemoryManager:
                     await self.store.update_importance(u.memory_id, new_imp, now)
                     adjusted += 1
 
-        if adjusted:
-            await self.clear_cache()
         return {"adjusted": adjusted}
 
     async def pin_memory(self, memory_id: str) -> bool:
         """Pin a memory so it always ranks highest in retrieval."""
         result = await self.store.pin_memory(memory_id)
-        if result:
-            await self.clear_cache()
         return result
 
     async def unpin_memory(self, memory_id: str) -> bool:
         """Unpin a previously pinned memory."""
         result = await self.store.unpin_memory(memory_id)
-        if result:
-            await self.clear_cache()
         return result
 
     async def provide_feedback(self, memory_id: str, helpful) -> None:
@@ -803,7 +682,6 @@ class MemoryManager:
         if isinstance(helpful, str):
             helpful = helpful.lower() in ("positive", "true", "yes", "1", "helpful")
         await self.store.record_feedback(memory_id, helpful)
-        await self.clear_cache()
         self._notify("feedback", memory_id=memory_id, helpful=helpful)
 
     async def analyze_feedback_patterns(self, scope_id: str | None = None) -> dict:
@@ -929,8 +807,6 @@ class MemoryManager:
             clamped = max(0.1, min(0.99, importance))
             await self.store.update_importance(memory_id, round(clamped, 4), now)
             count += 1
-        if count:
-            await self.clear_cache()
         return count
 
     async def apply_retention_policy(
@@ -976,7 +852,6 @@ class MemoryManager:
 
         if to_archive_ids:
             await self.store.bulk_archive(to_archive_ids)
-            await self.clear_cache()
 
         return {"archived": archived, "scope_id": scope}
 
@@ -1031,7 +906,6 @@ class MemoryManager:
 
         if to_archive_ids:
             await self.store.bulk_archive(to_archive_ids)
-            await self.clear_cache()
         return {"archived": archived, "scope_id": scope}
 
     async def apply_adaptive_ttl(
@@ -1125,7 +999,6 @@ class MemoryManager:
 
         if to_archive:
             await self.store.bulk_archive(to_archive)
-            await self.clear_cache()
 
         return {"archived": len(to_archive), "scope_id": scope}
 
@@ -1253,7 +1126,6 @@ class MemoryManager:
         if migrated:
             to_archive = [u.memory_id for u in units]
             await self.store.bulk_archive(to_archive)
-            await self.clear_cache()
         self._notify("scope_migration", from_scope=from_scope, to_scope=to_scope, migrated=migrated)
         return {"migrated": migrated, "from_scope": from_scope, "to_scope": to_scope}
 
@@ -2172,7 +2044,6 @@ class MemoryManager:
             if unit and unit.status.value == "active":
                 active_ids.append(mid)
         archived = await self.store.bulk_archive(active_ids)
-        await self.clear_cache()
 
         return {
             "archived": archived,
@@ -2855,7 +2726,6 @@ class MemoryManager:
             except Exception:
                 failed += 1
 
-        await self.clear_cache()
         return {"updated": updated, "failed": failed, "total": len(updates)}
 
     async def compute_freshness_scores(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
@@ -2978,7 +2848,6 @@ class MemoryManager:
             return {"memory_id": memory_id, "changed": False}
 
         await self.store.update_content(memory_id, normalized)
-        await self.clear_cache()
         return {
             "memory_id": memory_id,
             "changed": True,
@@ -2998,7 +2867,6 @@ class MemoryManager:
                 await self.store.update_content(u.memory_id, clean)
                 normalized += 1
 
-        await self.clear_cache()
         return {"total": len(units), "normalized": normalized}
 
     async def get_priority_queue(
@@ -3384,7 +3252,6 @@ class MemoryManager:
             if vec:
                 await self.store.update_embedding(unit.memory_id, vec)
                 re_embedded += 1
-        await self.clear_cache()
         return {"scope_id": scope, "re_embedded": re_embedded, "total": len(units)}
 
     async def compress_content(self, memory_id: str) -> dict:
@@ -3404,7 +3271,6 @@ class MemoryManager:
             return {"memory_id": memory_id, "changed": False, "length": len(original)}
 
         await self.store.update_content(memory_id, compressed)
-        await self.clear_cache()
         return {
             "memory_id": memory_id,
             "changed": True,
@@ -3431,7 +3297,6 @@ class MemoryManager:
                 compressed += 1
                 total_saved += saved
 
-        await self.clear_cache()
         return {"total": len(units), "compressed": compressed, "chars_saved": total_saved}
 
     async def bulk_tag_by_type(
@@ -3463,7 +3328,6 @@ class MemoryManager:
                     await self.store.add_tags(u.memory_id, new_tags)
                     tagged += 1
 
-        await self.clear_cache()
         return {"total": len(units), "tagged": tagged}
 
     async def analyze_retention_effectiveness(self, scope_id: str | None = None) -> dict:
@@ -3587,7 +3451,6 @@ class MemoryManager:
                 await self.store.bulk_archive([remove])
                 archived += 1
 
-        await self.clear_cache()
         return {
             "scope_id": scope,
             "duplicates_found": len(pairs),
@@ -3826,7 +3689,6 @@ class MemoryManager:
         to_archive = [u.memory_id for u in units if u.importance < 0.99]
         archived = await self.store.bulk_archive(to_archive) if to_archive else 0
         pinned_count = len(units) - len(to_archive)
-        await self.clear_cache()
         return {
             "scope_id": scope_id,
             "archived": archived,
@@ -3858,7 +3720,6 @@ class MemoryManager:
                 await self.store.update_importance(u.memory_id, 0.99, now)
                 pinned += 1
 
-        await self.clear_cache()
         return {"scope_id": scope, "pinned": pinned, "total": len(units)}
 
     async def export_scope_yaml(self, scope_id: str | None = None) -> str:

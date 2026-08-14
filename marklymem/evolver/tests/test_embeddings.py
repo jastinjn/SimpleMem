@@ -151,7 +151,7 @@ class TestOpenAIEmbedderBatch:
         embedder._CHUNK_SIZE = chunk_size
 
         async def fake_acall(texts):
-            return _fake_embeddings(texts, dim)
+            return _fake_embeddings(texts, dim), 0
 
         mock = AsyncMock(side_effect=fake_acall)
         embedder._acall_api = mock  # type: ignore[method-assign]
@@ -214,7 +214,7 @@ class TestOpenAIEmbedderBatch:
         embedder._async_client = mock_async_client
 
         with patch("marklymem.evolver.embeddings.asyncio.sleep", new_callable=AsyncMock):
-            result = await embedder._acall_api(["hello world test"])
+            result, _ = await embedder._acall_api(["hello world test"])
 
         assert attempts["n"] == 2
         assert len(result) == 1
