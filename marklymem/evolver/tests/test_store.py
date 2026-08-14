@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.models import MemoryStatus, MemoryType
+from marklymem.evolver.models import MemoryStatus, MemoryType
 
 from .conftest import UID, _make_unit, create_test_units
 

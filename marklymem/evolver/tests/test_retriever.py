@@ -14,10 +14,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.embeddings import HashingEmbedder
-from evolver_server.evolver.models import MemoryQuery, MemoryType
-from evolver_server.evolver.policy import MemoryPolicy
-from evolver_server.evolver.retriever import MemoryRetriever
+from marklymem.evolver.embeddings import HashingEmbedder
+from marklymem.evolver.models import MemoryQuery, MemoryType
+from marklymem.evolver.policy import MemoryPolicy
+from marklymem.evolver.retriever import MemoryRetriever
 
 from .conftest import UID, _make_unit, create_test_units
 
@@ -123,7 +123,7 @@ class TestEmbeddingRetrieval:
         r = MemoryRetriever(store, policy=policy, retrieval_mode="embedding", embedder=embedder)
         hits = await r.retrieve(_query("PostgreSQL database server", scope_id="score_scope"))
         assert len(hits) == 1
-        from evolver_server.evolver.embeddings import cosine_similarity
+        from marklymem.evolver.embeddings import cosine_similarity
         sim = cosine_similarity(embedder.encode("PostgreSQL database server"), u.embedding)
         expected = (sim + 0.5 * 0.8 + 0.0) * 1.0 * (0.8 + 0.2 * 0.9)
         assert hits[0].score == pytest.approx(expected, abs=1e-4)
@@ -254,7 +254,7 @@ class TestRecencyBonus:
             assert scores["recent-001"] > scores["old-001"]
 
     def test_recency_zero_at_boundary(self):
-        from evolver_server.evolver.retriever import _estimate_recency_bonus
+        from marklymem.evolver.retriever import _estimate_recency_bonus
         bonus = _estimate_recency_bonus("2000-01-01T00:00:00+00:00", recent_bonus_hours=72)
         assert bonus == pytest.approx(0.0)
 

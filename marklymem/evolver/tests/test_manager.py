@@ -14,11 +14,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.embeddings import HashingEmbedder, OpenAIEmbedder
-from evolver_server.evolver.manager import MemoryManager
-from evolver_server.evolver.models import MemoryType
-from evolver_server.evolver.policy import MemoryPolicy
-from evolver_server.evolver.store import MemoryStore
+from marklymem.evolver.embeddings import HashingEmbedder, OpenAIEmbedder
+from marklymem.evolver.manager import MemoryManager
+from marklymem.evolver.models import MemoryType
+from marklymem.evolver.policy import MemoryPolicy
+from marklymem.evolver.store import MemoryStore
 
 from .conftest import UID, _make_unit
 
@@ -51,7 +51,7 @@ def _manager(
 
 
 def _patch_time(monkeypatch):
-    monkeypatch.setattr("evolver_server.evolver.manager.utc_now_iso", lambda: FIXED_TS)
+    monkeypatch.setattr("marklymem.evolver.manager.utc_now_iso", lambda: FIXED_TS)
 
 
 SAMPLE_TURNS = [
@@ -190,7 +190,7 @@ class TestIngestSessionTurns:
         fake_settings = MagicMock()
         fake_settings.OPENAI_API_KEY = "sk-test"
         fake_settings.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
-        monkeypatch.setattr("evolver_server.config.get_settings", lambda: fake_settings)
+        monkeypatch.setattr("marklymem.config.get_settings", lambda: fake_settings)
 
         embedder = OpenAIEmbedder(dimensions=DIM)
         mgr = _manager(store, embedder=embedder)

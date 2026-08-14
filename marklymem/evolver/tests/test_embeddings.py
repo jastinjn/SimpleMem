@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.embeddings import (
+from marklymem.evolver.embeddings import (
     HashingEmbedder,
     OpenAIEmbedder,
     cosine_similarity,
@@ -118,8 +118,8 @@ def _make_openai_embedder(mock_settings=None) -> OpenAIEmbedder:
         mock_settings.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
     with (
-        patch("evolver_server.evolver.embeddings.OpenAIEmbedder.__init__.__globals__"),
-        patch("evolver_server.config.get_settings", return_value=mock_settings),
+        patch("marklymem.evolver.embeddings.OpenAIEmbedder.__init__.__globals__"),
+        patch("marklymem.config.get_settings", return_value=mock_settings),
         patch("openai.OpenAI"),
         patch("openai.AsyncOpenAI"),
     ):
@@ -213,7 +213,7 @@ class TestOpenAIEmbedderBatch:
         mock_async_client.embeddings.create = AsyncMock(side_effect=flaky_create)
         embedder._async_client = mock_async_client
 
-        with patch("evolver_server.evolver.embeddings.asyncio.sleep", new_callable=AsyncMock):
+        with patch("marklymem.evolver.embeddings.asyncio.sleep", new_callable=AsyncMock):
             result = await embedder._acall_api(["hello world test"])
 
         assert attempts["n"] == 2

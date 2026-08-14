@@ -2,7 +2,7 @@
 """API test fixtures.
 
 DB scaffolding (test_engine, test_sm, _worker_schema, _clean_tables) lives in
-the root evolver_server/conftest.py and is inherited here automatically.
+the root marklymem/conftest.py and is inherited here automatically.
 """
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from __future__ import annotations
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from evolver_server.app import app
-from evolver_server.evolver.manager import MemoryManager
-from evolver_server.evolver.store import MemoryStore
-from evolver_server.evolver.tests.conftest import create_test_units
+from marklymem.app import app
+from marklymem.evolver.manager import MemoryManager
+from marklymem.evolver.store import MemoryStore
+from marklymem.evolver.tests.conftest import create_test_units
 
 USER_ID = "user-alice"
 SCOPE = "alice"

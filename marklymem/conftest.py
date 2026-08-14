@@ -14,7 +14,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from evolver_server.evolver.db import build_sessionmaker
+from marklymem.evolver.db import build_sessionmaker
 
 _TEST_DB_URL = os.environ.get(
     "EVOLVER_DATABASE_URL",

@@ -33,7 +33,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = [".."]
-include = ["evolver_server", "evolver_server.*"]
+include = ["marklymem", "marklymem.*"]
 
 [tool.ruff]
 target-version = "py310"

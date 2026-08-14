@@ -24,8 +24,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver import llm_extractor as le
-from evolver_server.evolver.llm_extractor import (
+from marklymem.evolver import llm_extractor as le
+from marklymem.evolver.llm_extractor import (
     AssignableMemoryType,
     ExtractedEntries,
     ExtractedEntry,
@@ -33,7 +33,7 @@ from evolver_server.evolver.llm_extractor import (
     LLMMemoryExtractor,
     _coerce_score,
 )
-from evolver_server.evolver.models import MemoryType
+from marklymem.evolver.models import MemoryType
 
 
 # --------------------------------------------------------------------------- #

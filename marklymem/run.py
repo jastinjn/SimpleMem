@@ -12,7 +12,7 @@ import logging
 
 import uvicorn
 
-from evolver_server.config import get_settings
+from marklymem.config import get_settings
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
     )
 
     uvicorn.run(
-        "evolver_server.app:app",
+        "marklymem.app:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

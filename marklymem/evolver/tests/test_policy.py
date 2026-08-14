@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from evolver_server.evolver.policy import MemoryPolicy
+from marklymem.evolver.policy import MemoryPolicy
 
 
 class TestMemoryPolicyDefaults:

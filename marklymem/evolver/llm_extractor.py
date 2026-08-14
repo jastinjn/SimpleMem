@@ -1,7 +1,7 @@
 """LLM-based memory extraction for the evolver write pipeline.
 
 This is the ``ingestion_mode="llm"`` counterpart to the regex/keyword extraction
-in :mod:`evolver_server.evolver.manager`. Instead of matching hard-coded patterns
+in :mod:`marklymem.evolver.manager`. Instead of matching hard-coded patterns
 turn by turn, it sends *windows* of the session to an LLM and receives structured
 memory entries back — the same idea as :mod:`simplemem.core.memory_builder`,
 adapted to the evolver's async, direct-call world and richer :class:`MemoryUnit`

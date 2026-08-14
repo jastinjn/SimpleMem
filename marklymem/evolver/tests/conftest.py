@@ -34,8 +34,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: F401 — used by callers
 
-from evolver_server.evolver.models import MemoryType, MemoryUnit
-from evolver_server.evolver.store import MemoryStore
+from marklymem.evolver.models import MemoryType, MemoryUnit
+from marklymem.evolver.store import MemoryStore
 
 # Default test user_id used across all unit tests.
 UID = "user-test"
@@ -213,7 +213,7 @@ FROZEN_NOW = datetime(2025, 2, 15, 0, 0, 0, tzinfo=timezone.utc)
 def frozen_retriever_clock(monkeypatch):
     """Patch retriever.datetime so _estimate_recency_bonus uses a fixed now."""
     clock = FrozenClock(FROZEN_NOW)
-    monkeypatch.setattr("evolver_server.evolver.retriever.datetime", clock)
+    monkeypatch.setattr("marklymem.evolver.retriever.datetime", clock)
     return clock
 
 
@@ -221,7 +221,7 @@ def frozen_retriever_clock(monkeypatch):
 def frozen_consolidator_clock(monkeypatch):
     """Patch consolidator.datetime so decay uses a fixed now."""
     clock = FrozenClock(FROZEN_NOW)
-    monkeypatch.setattr("evolver_server.evolver.consolidator.datetime", clock)
+    monkeypatch.setattr("marklymem.evolver.consolidator.datetime", clock)
     return clock
 
 
@@ -245,5 +245,5 @@ def fake_uuid(monkeypatch):
             return _real_uuid.UUID(f"00000000-0000-0000-0000-{cls._counter:012d}")
 
     _FakeUUID._counter = 0
-    monkeypatch.setattr("evolver_server.evolver.manager.uuid", _FakeUUID)
+    monkeypatch.setattr("marklymem.evolver.manager.uuid", _FakeUUID)
     return _FakeUUID

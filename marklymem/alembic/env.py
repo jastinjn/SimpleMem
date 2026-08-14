@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from evolver_server.config import get_settings
-from evolver_server.evolver.schema import (  # noqa: F401 — register all models
+from marklymem.config import get_settings
+from marklymem.evolver.schema import (  # noqa: F401 — register all models
     Base,
     Memory,
     MemoryAnnotation,

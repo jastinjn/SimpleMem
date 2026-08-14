@@ -13,12 +13,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from evolver_server.evolver.db import build_engine, build_sessionmaker
-from evolver_server.evolver.embeddings import create_embedder
-from evolver_server.evolver.llm_extractor import create_llm_extractor
-from evolver_server.evolver.manager import MemoryManager
-from evolver_server.evolver.models import MemoryQuery
-from evolver_server.evolver.store import MemoryStore
+from marklymem.evolver.db import build_engine, build_sessionmaker
+from marklymem.evolver.embeddings import create_embedder
+from marklymem.evolver.llm_extractor import create_llm_extractor
+from marklymem.evolver.manager import MemoryManager
+from marklymem.evolver.models import MemoryQuery
+from marklymem.evolver.store import MemoryStore
 
 from .config import get_settings
 from .models import (
