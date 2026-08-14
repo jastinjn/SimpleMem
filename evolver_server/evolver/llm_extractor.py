@@ -62,7 +62,15 @@ class ExtractedEntry(BaseModel):
         description="The kind of memory this entry represents."
     )
     importance: float = Field(description="0.0-1.0 value of this memory for future recall.")
-    confidence: float = Field(description="0.0-1.0 certainty of the statement given the dialogue.")
+    confidence: float = Field(
+        description=(
+            "How explicitly was this stated in the dialogue? "
+            "1.0 = stated directly and unambiguously; "
+            "0.7–0.9 = stated clearly but with some implied context; "
+            "0.4–0.6 = inferred or implied, not stated outright; "
+            "0.1–0.3 = speculative or heavily inferred from context."
+        )
+    )
     persons: list[str] = Field(
         default_factory=list, description="People mentioned (e.g. student or teacher names)."
     )
@@ -108,7 +116,7 @@ Requirements:
        * "episodic" — a specific event, action, or exchange tied to this session.
    - importance: float 0.0-1.0. How valuable is this for future recall?
      (stable preferences/instructions high ~0.8-0.9; incidental chatter low ~0.3.)
-   - confidence: float 0.0-1.0. How certain is the statement given the dialogue?
+   - confidence: float 0.0-1.0. How explicitly was this stated? See field description for the rubric.
 """
 
 

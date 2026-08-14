@@ -16,7 +16,7 @@ class TestMemoryAdd:
     async def test_both_fields_empty_is_422(self, client):
         assert (await client.post("/memory/add", json={"user_id": USER_ID})).status_code == 422
 
-    async def test_returns_turns_received(self, client_and_store):
+    async def test_returns_units_added(self, client_and_store):
         client, store = client_and_store
         r = await client.post("/memory/add", json={
             "user_id": USER_ID,
@@ -28,6 +28,7 @@ class TestMemoryAdd:
         body = r.json()
         assert body["user_id"] == USER_ID
         assert body["scope_id"] == SCOPE
+        assert body["units_added"] > 0
         active = await store.list_active(USER_ID, SCOPE)
         contents = " ".join(u.content for u in active).lower()
         assert "terraform" in contents
@@ -52,6 +53,7 @@ class TestMemoryAdd:
         assert any("terraform" in u.content.lower() for u in active)
 
     async def test_consolidates_after_add(self, client):
+        # First add — no duplicates yet, nothing to consolidate.
         r1 = await client.post("/memory/add", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
@@ -59,18 +61,7 @@ class TestMemoryAdd:
             "response_text": "Got it.",
         })
         assert r1.status_code == 200
-        s1 = (await client.post("/memory/stats", json={"user_id": USER_ID, "scope_id": SCOPE})).json()
-        assert s1["total"] > 0
-
-        r2 = await client.post("/memory/add", json={
-            "user_id": USER_ID,
-            "scope_id": SCOPE,
-            "prompt_text": "We deploy with Helm charts for all services",
-            "response_text": "Got it.",
-        })
-        assert r2.status_code == 200
-        s2 = (await client.post("/memory/stats", json={"user_id": USER_ID, "scope_id": SCOPE})).json()
-        assert s2["total"] >= s1["total"]
+        assert r1.json()["units_consolidated"] == 0
 
     async def test_does_not_write_to_other_scope(self, client):
         await client.post("/memory/add", json={
@@ -103,7 +94,11 @@ class TestMemoryAddBatch:
     async def test_empty_turns_is_422(self, client):
         assert (await client.post("/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": []})).status_code == 422
 
-    async def test_returns_turns_received(self, client):
+    async def test_over_50_turns_is_422(self, client):
+        turns = [{"prompt_text": f"Turn {i}", "response_text": "Ok."} for i in range(51)]
+        assert (await client.post("/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": turns})).status_code == 422
+
+    async def test_returns_units_added(self, client):
         r = await client.post("/memory/add_batch", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
@@ -113,7 +108,7 @@ class TestMemoryAddBatch:
             ],
         })
         assert r.status_code == 200
-        assert r.json()["user_id"] == USER_ID
+        assert r.json()["units_added"] > 0
 
     async def test_new_content_is_retrievable(self, client):
         await client.post("/memory/add_batch", json={
@@ -128,23 +123,20 @@ class TestMemoryAddBatch:
         assert r.json()["total"] > 0
 
     async def test_consolidates_after_add_batch(self, client):
-        r1 = await client.post("/memory/add_batch", json={
+        # Sending the same turn twice in one batch bypasses pre-store dedup,
+        # so both units are written and consolidation supersedes the older one.
+        r = await client.post("/memory/add_batch", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
-            "turns": [{"prompt_text": "We deploy with Helm charts for all services", "response_text": "Got it."}],
+            "turns": [
+                {"prompt_text": "We deploy with Helm charts for all services", "response_text": "Got it."},
+                {"prompt_text": "We deploy with Helm charts for all services", "response_text": "Got it."},
+            ],
         })
-        assert r1.status_code == 200
-        s1 = (await client.post("/memory/stats", json={"user_id": USER_ID, "scope_id": SCOPE})).json()
-        assert s1["total"] > 0
-
-        r2 = await client.post("/memory/add_batch", json={
-            "user_id": USER_ID,
-            "scope_id": SCOPE,
-            "turns": [{"prompt_text": "We use Datadog for infrastructure monitoring", "response_text": "Understood."}],
-        })
-        assert r2.status_code == 200
-        s2 = (await client.post("/memory/stats", json={"user_id": USER_ID, "scope_id": SCOPE})).json()
-        assert s2["total"] >= s1["total"]
+        assert r.status_code == 200
+        body = r.json()
+        assert body["units_added"] > 0
+        assert body["units_consolidated"] >= 1
 
     async def test_does_not_write_to_other_scope(self, client):
         await client.post("/memory/add_batch", json={

@@ -76,14 +76,14 @@ class TestIngestSessionTurns:
     async def test_returns_positive_count(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store)
-        added = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
-        assert added > 0
+        result = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
+        assert result["added"] > 0
 
     async def test_empty_turns_produces_no_units(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store)
-        added = await mgr.ingest_session_turns("sess-001", [])
-        assert added == 0
+        result = await mgr.ingest_session_turns("sess-001", [])
+        assert result["added"] == 0
         assert await store.list_active(UID, "test") == []
 
     async def test_short_content_filtered(self, store, monkeypatch, fake_uuid):
@@ -97,10 +97,10 @@ class TestIngestSessionTurns:
     async def test_dedup_skips_existing_content(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store)
-        added_first = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
+        first = await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         await mgr.clear_cache()
-        added_second = await mgr.ingest_session_turns("sess-002", SAMPLE_TURNS)
-        assert added_second <= added_first
+        second = await mgr.ingest_session_turns("sess-002", SAMPLE_TURNS)
+        assert second["added"] <= first["added"]
 
     async def test_auto_consolidate_false_does_not_consolidate(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
@@ -222,7 +222,7 @@ class TestIngestSessionTurnsLLMMode:
         llm_extractor.extract_session = AsyncMock(return_value=[llm_unit])
 
         mgr = _manager(store, ingestion_mode="llm", llm_extractor=llm_extractor)
-        added = await mgr.ingest_session_turns("sess-llm", SAMPLE_TURNS)
+        result = await mgr.ingest_session_turns("sess-llm", SAMPLE_TURNS)
 
         llm_extractor.extract_session.assert_awaited_once_with(
             turns=SAMPLE_TURNS,
@@ -230,7 +230,7 @@ class TestIngestSessionTurnsLLMMode:
             scope_id="test",
             session_id="sess-llm",
         )
-        assert added > 0
+        assert result["added"] > 0
         contents = {u.content for u in await store.list_active(UID, "test")}
         assert "A fact extracted by the LLM ingestion path" in contents
 

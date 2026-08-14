@@ -154,13 +154,15 @@ class MemoryManager:
         turns: list[dict],
         user_id: str | None = None,
         scope_id: str | None = None,
-    ) -> int:
+    ) -> dict[str, int]:
         """Create memory units from a completed session.
 
         Branches on the manager's ``ingestion_mode``: ``"llm"`` sends windows of the
         session to an LLM via ``self.llm_extractor``; ``"pattern"`` (default) uses
         per-turn regex/keyword extraction. Everything after (dedup,
         conflict detection, embedding, store, consolidation, telemetry) is shared.
+
+        Returns a dict with keys: ``added``, ``superseded``, ``decayed``, ``reinforced``.
         """
         uid = user_id or self.user_id
         scope = scope_id or self.scope_id
@@ -264,6 +266,7 @@ class MemoryManager:
                 unit.content,
             )
         await self.clear_cache()
+        consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:
             consolidation_result = await self.consolidator.consolidate(uid, scope)
             if self.telemetry_store is not None and consolidation_result:
@@ -305,7 +308,12 @@ class MemoryManager:
         except Exception:
             pass  # Best-effort stats tracking.
         self._notify("ingest", scope_id=scope, session_id=session_id, added=added)
-        return added
+        return {
+            "added": added,
+            "superseded": consolidation_result.get("superseded", 0),
+            "decayed": consolidation_result.get("decayed", 0),
+            "reinforced": consolidation_result.get("reinforced", 0),
+        }
 
     async def retrieve_for_prompt(
         self,

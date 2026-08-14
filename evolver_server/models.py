@@ -35,7 +35,7 @@ class AddBatchRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     scope_id: str | None = None
     session_id: str = Field("api")
-    turns: list[TurnIn] = Field(..., min_length=1)
+    turns: list[TurnIn] = Field(..., min_length=1, max_length=50)
 
 
 class RetrieveRequest(BaseModel):
@@ -62,7 +62,8 @@ class AddResponse(BaseModel):
     user_id: str
     scope_id: str | None
     session_id: str
-    turns_received: int
+    units_added: int
+    units_consolidated: int
 
 
 class MemoryHit(BaseModel):
