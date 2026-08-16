@@ -30,7 +30,7 @@ def _manager(
     retrieval_mode: str = "keyword",
     embedder=None,
     user_id: str = UID,
-    scope_id: str = "test",
+    namespace: str = "test",
     ingestion_mode: str = "pattern",
     llm_extractor=None,
 ) -> MemoryManager:
@@ -39,7 +39,7 @@ def _manager(
         store=store,
         policy=policy,
         user_id=user_id,
-        scope_id=scope_id,
+        namespace=namespace,
         auto_consolidate=auto_consolidate,
         retrieval_mode=retrieval_mode,
         embedder=embedder,
@@ -100,8 +100,8 @@ class TestIngestSessionTurns:
     async def test_auto_consolidate_false_does_not_consolidate(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store, auto_consolidate=False)
-        dup1 = _make_unit(memory_id="dup-001", scope_id="test", content="Duplicate content for consolidation test")
-        dup2 = _make_unit(memory_id="dup-002", scope_id="test", content="Duplicate content for consolidation test")
+        dup1 = _make_unit(memory_id="dup-001", namespace="test", content="Duplicate content for consolidation test")
+        dup2 = _make_unit(memory_id="dup-002", namespace="test", content="Duplicate content for consolidation test")
         await store.add_memories([dup1, dup2])
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         active_ids = {u.memory_id for u in await store.list_active(UID, "test")}
@@ -111,8 +111,8 @@ class TestIngestSessionTurns:
     async def test_auto_consolidate_true_consolidates(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         mgr = _manager(store, auto_consolidate=True)
-        dup1 = _make_unit(memory_id="dup-001", scope_id="test", content="Duplicate content for consolidation test")
-        dup2 = _make_unit(memory_id="dup-002", scope_id="test", content="Duplicate content for consolidation test")
+        dup1 = _make_unit(memory_id="dup-001", namespace="test", content="Duplicate content for consolidation test")
+        dup2 = _make_unit(memory_id="dup-002", namespace="test", content="Duplicate content for consolidation test")
         await store.add_memories([dup1, dup2])
         await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS)
         active_ids = {u.memory_id for u in await store.list_active(UID, "test")}
@@ -133,10 +133,10 @@ class TestIngestSessionTurns:
         units = await store.list_active(UID, "test")
         assert all(u.embedding == [] for u in units)
 
-    async def test_custom_scope_id_used(self, store, monkeypatch, fake_uuid):
+    async def test_custom_namespace_used(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
-        mgr = _manager(store, scope_id="default")
-        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, user_id=UID, scope_id="custom_scope")
+        mgr = _manager(store, namespace="default")
+        await mgr.ingest_session_turns("sess-001", SAMPLE_TURNS, user_id=UID, namespace="custom_scope")
         assert (await store.get_stats(UID, "custom_scope"))["active"] > 0
         assert (await store.get_stats(UID, "default"))["active"] == 0
 
@@ -208,7 +208,7 @@ class TestIngestSessionTurnsLLMMode:
         from unittest.mock import AsyncMock
 
         llm_unit = _make_unit(
-            scope_id="test",
+            namespace="test",
             memory_type=MemoryType.SEMANTIC,
             content="A fact extracted by the LLM ingestion path",
             updated_at="2025-01-01T00:00:01+00:00",
@@ -222,7 +222,7 @@ class TestIngestSessionTurnsLLMMode:
         llm_extractor.extract_session.assert_awaited_once_with(
             turns=SAMPLE_TURNS,
             user_id=UID,
-            scope_id="test",
+            namespace="test",
             session_id="sess-llm",
         )
         assert result["added"] > 0
@@ -244,7 +244,7 @@ class TestRenderForPrompt:
         _patch_time(monkeypatch)
         mgr = _manager(store)
         u = _make_unit(
-            memory_id="rend-001", scope_id="test",
+            memory_id="rend-001", namespace="test",
             memory_type=MemoryType.SEMANTIC,
             content="PostgreSQL is the database",
             updated_at="2025-01-01T00:00:01+00:00",
@@ -256,13 +256,13 @@ class TestRenderForPrompt:
         _patch_time(monkeypatch)
         mgr = _manager(store)
         u_sem = _make_unit(
-            memory_id="g-001", scope_id="test",
+            memory_id="g-001", namespace="test",
             memory_type=MemoryType.SEMANTIC,
             content="semantic content",
             updated_at="2025-01-01T00:00:01+00:00",
         )
         u_ep = _make_unit(
-            memory_id="g-002", scope_id="test",
+            memory_id="g-002", namespace="test",
             memory_type=MemoryType.EPISODIC,
             content="episodic content",
             updated_at="2025-01-01T00:00:02+00:00",
@@ -275,14 +275,14 @@ class TestRenderForPrompt:
         _patch_time(monkeypatch)
         mgr = _manager(store)
         unpinned = _make_unit(
-            memory_id="p-001", scope_id="test",
+            memory_id="p-001", namespace="test",
             memory_type=MemoryType.SEMANTIC,
             content="regular memory unit",
             importance=0.5,
             updated_at="2025-01-01T00:00:02+00:00",
         )
         pinned = _make_unit(
-            memory_id="p-002", scope_id="test",
+            memory_id="p-002", namespace="test",
             memory_type=MemoryType.EPISODIC,
             content="pinned memory unit",
             importance=0.99,

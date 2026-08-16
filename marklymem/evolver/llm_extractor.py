@@ -164,7 +164,7 @@ class LLMMemoryExtractor:
         self,
         turns: list[dict],
         user_id: str,
-        scope_id: str,
+        namespace: str,
         session_id: str | None,
     ) -> list[MemoryUnit]:
         """Extract memory units from all turns of one session.
@@ -183,7 +183,7 @@ class LLMMemoryExtractor:
             async def _run(window: list[dict], start: int, end: int) -> list[MemoryUnit]:
                 async with sem:
                     return await self._extract_window(
-                        window, start, end, user_id, scope_id, session_id
+                        window, start, end, user_id, namespace, session_id
                     )
 
             results = await asyncio.gather(
@@ -243,7 +243,7 @@ class LLMMemoryExtractor:
         start: int,
         end: int,
         user_id: str,
-        scope_id: str,
+        namespace: str,
         session_id: str | None,
     ) -> list[MemoryUnit]:
         dialogue_text = self._render_dialogue(turns)
@@ -266,7 +266,7 @@ class LLMMemoryExtractor:
             entries = parsed.entries if parsed is not None else []
             if entries:
                 return self._entries_to_units(
-                    entries, start, end, user_id, scope_id, session_id
+                    entries, start, end, user_id, namespace, session_id
                 )
             logger.debug(
                 "[LLM extract] window %d-%d attempt %d: no entries",
@@ -281,7 +281,7 @@ class LLMMemoryExtractor:
         start: int,
         end: int,
         user_id: str,
-        scope_id: str,
+        namespace: str,
         session_id: str | None,
     ) -> list[MemoryUnit]:
         units: list[MemoryUnit] = []
@@ -301,7 +301,7 @@ class LLMMemoryExtractor:
                 MemoryUnit(
                     memory_id=str(uuid.uuid4()),
                     user_id=user_id,
-                    scope_id=scope_id,
+                    namespace=namespace,
                     memory_type=mtype,
                     content=content,
                     source_session_id=session_id,

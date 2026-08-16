@@ -25,11 +25,15 @@ class MemoryStore:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _where_user_scope(self, user_id: str, scope_id: str | None):
+    def _namespace_cond(self, namespace: str):
+        escaped = namespace.replace("_", r"\_")
+        return (Memory.namespace == namespace) | Memory.namespace.like(escaped + "/%", escape="\\")
+
+    def _where_user_namespace(self, user_id: str, namespace: str | None):
         if not user_id:
             raise ValueError("user_id is required")
-        if scope_id is not None:
-            return (Memory.user_id == user_id) & (Memory.scope_id == scope_id)
+        if namespace is not None:
+            return (Memory.user_id == user_id) & self._namespace_cond(namespace)
         return Memory.user_id == user_id
 
     # ------------------------------------------------------------------
@@ -43,7 +47,7 @@ class MemoryStore:
                 vals = dict(
                     memory_id=unit.memory_id,
                     user_id=unit.user_id,
-                    scope_id=unit.scope_id,
+                    namespace=unit.namespace,
                     memory_type=unit.memory_type.value,
                     content=unit.content,
                     source_session_id=unit.source_session_id,
@@ -86,15 +90,28 @@ class MemoryStore:
             result = await s.execute(select(Memory).where(Memory.memory_id.in_(memory_ids)))
             return [r.to_unit() for r in result.scalars()]
 
-    async def list_active(self, user_id: str, scope_id: str | None = None, limit: int = 100) -> list[MemoryUnit]:
+    async def _list_active_with_cond(self, namespace_cond, limit: int) -> list[MemoryUnit]:
         async with self._sm() as s:
-            cond = self._where_user_scope(user_id, scope_id) & (Memory.status == MemoryStatus.ACTIVE.value)
             result = await s.execute(
-                select(Memory).where(cond).order_by(Memory.updated_at.desc()).limit(limit)
+                select(Memory)
+                .where(namespace_cond & (Memory.status == MemoryStatus.ACTIVE.value))
+                .order_by(Memory.updated_at.desc())
+                .limit(limit)
             )
             units = [r.to_unit() for r in result.scalars()]
         now_iso = _utc_now_iso()
         return [u for u in units if not u.expires_at or u.expires_at > now_iso]
+
+    async def list_active_exact(self, user_id: str, namespace: str | None = None, limit: int = 100) -> list[MemoryUnit]:
+        """Same as list_active but matches namespace exactly — no subtree expansion."""
+        if namespace is not None:
+            cond = (Memory.user_id == user_id) & (Memory.namespace == namespace)
+        else:
+            cond = Memory.user_id == user_id
+        return await self._list_active_with_cond(cond, limit)
+
+    async def list_active(self, user_id: str, namespace: str | None = None, limit: int = 100) -> list[MemoryUnit]:
+        return await self._list_active_with_cond(self._where_user_namespace(user_id, namespace), limit)
 
     async def update_content(self, memory_id: str, content: str) -> bool:
         async with self._sm() as s:
@@ -151,7 +168,7 @@ class MemoryStore:
         now = _utc_now_iso()
         async with self._sm() as s:
             result = await s.execute(
-                select(Memory.memory_id, Memory.scope_id)
+                select(Memory.memory_id, Memory.namespace)
                 .where(Memory.memory_id.in_(memory_ids))
                 .where(Memory.status == MemoryStatus.ACTIVE.value)
             )
@@ -176,13 +193,13 @@ class MemoryStore:
             await s.commit()
         return True
 
-    async def expire_stale(self, user_id: str, scope_id: str) -> int:
+    async def expire_stale(self, user_id: str, namespace: str) -> int:
         now_iso = _utc_now_iso()
         async with self._sm() as s:
             result = await s.execute(
                 select(Memory.memory_id).where(
                     (Memory.user_id == user_id)
-                    & (Memory.scope_id == scope_id)
+                    & self._namespace_cond(namespace)
                     & (Memory.status == MemoryStatus.ACTIVE.value)
                     & (Memory.expires_at != "")
                     & (Memory.expires_at <= now_iso)
@@ -237,7 +254,7 @@ class MemoryStore:
     # Search
     # ------------------------------------------------------------------
 
-    async def search_keyword(self, user_id: str, scope_id: str | None, query_text: str, limit: int = 6) -> list[MemorySearchHit]:
+    async def search_keyword(self, user_id: str, namespace: str | None, query_text: str, limit: int = 6) -> list[MemorySearchHit]:
         terms = [t.lower() for t in _tokenize(query_text) if t]
         if not terms:
             return []
@@ -245,7 +262,7 @@ class MemoryStore:
         ts_query = " OR ".join(terms[:12])
         async with self._sm() as s:
             cond = (
-                self._where_user_scope(user_id, scope_id)
+                self._where_user_namespace(user_id, namespace)
                 & (Memory.status == MemoryStatus.ACTIVE.value)
                 & text("content_tsv @@ websearch_to_tsquery('english', :q)").bindparams(q=ts_query)
             )
@@ -255,12 +272,12 @@ class MemoryStore:
             units = [r.to_unit() for r in result.scalars()]
         if not units:
             return self._search_keyword_manual_sync(
-                await self._list_active_sync(user_id, scope_id, limit=500), terms, limit
+                await self._list_active_sync(user_id, namespace, limit=500), terms, limit
             )
         return self._rank_with_idf(units, terms, limit)
 
-    async def _list_active_sync(self, user_id: str, scope_id: str | None, limit: int) -> list[MemoryUnit]:
-        return await self.list_active(user_id, scope_id, limit=limit)
+    async def _list_active_sync(self, user_id: str, namespace: str | None, limit: int) -> list[MemoryUnit]:
+        return await self.list_active(user_id, namespace, limit=limit)
 
     def _search_keyword_manual_sync(self, units: list[MemoryUnit], terms: list[str], limit: int) -> list[MemorySearchHit]:
         if not units:
@@ -293,13 +310,13 @@ class MemoryStore:
     def _rank_with_idf(self, units: list[MemoryUnit], terms: list[str], limit: int) -> list[MemorySearchHit]:
         return self._search_keyword_manual_sync(units, terms, limit)
 
-    async def search_vector(self, user_id: str, scope_id: str | None, query_embedding: list[float], limit: int = 10) -> list[MemoryUnit]:
+    async def search_vector(self, user_id: str, namespace: str | None, query_embedding: list[float], limit: int = 10) -> list[MemoryUnit]:
         if not query_embedding:
             return []
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         async with self._sm() as s:
             cond = (
-                self._where_user_scope(user_id, scope_id)
+                self._where_user_namespace(user_id, namespace)
                 & (Memory.status == MemoryStatus.ACTIVE.value)
                 & Memory.embedding.isnot(None)
             )
@@ -310,22 +327,22 @@ class MemoryStore:
             )
             return [r.to_unit() for r in result.scalars()]
 
-    async def search_by_tag(self, user_id: str, scope_id: str | None = None, tag: str = "", limit: int = 50) -> list[MemoryUnit]:
-        units = await self.list_active(user_id, scope_id, limit=limit)
+    async def search_by_tag(self, user_id: str, namespace: str | None = None, tag: str = "", limit: int = 50) -> list[MemoryUnit]:
+        units = await self.list_active(user_id, namespace, limit=limit)
         tag_lower = tag.lower().strip()
         return [u for u in units if tag_lower in {t.lower() for t in u.tags}]
 
     async def search_advanced(
         self,
         user_id: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         keyword: str = "",
         memory_type: str = "",
         tag: str = "",
         min_importance: float = 0.0,
         limit: int = 50,
     ) -> list[MemoryUnit]:
-        units = await self.list_active(user_id, scope_id, limit=limit * 5)
+        units = await self.list_active(user_id, namespace, limit=limit * 5)
         results = []
         keyword_lower = keyword.lower() if keyword else ""
         tag_lower = tag.lower().strip() if tag else ""
@@ -347,9 +364,9 @@ class MemoryStore:
     # Stats / analytics
     # ------------------------------------------------------------------
 
-    async def get_stats(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def get_stats(self, user_id: str, namespace: str | None = None) -> dict:
         async with self._sm() as s:
-            cond = self._where_user_scope(user_id, scope_id)
+            cond = self._where_user_namespace(user_id, namespace)
             total_row = (await s.execute(select(func.count()).where(cond))).scalar() or 0
             active_row = (await s.execute(
                 select(func.count()).where(cond & (Memory.status == MemoryStatus.ACTIVE.value))
@@ -366,25 +383,25 @@ class MemoryStore:
             "active_by_type": {str(r[0]): int(r[1]) for r in type_rows},
         }
 
-    async def list_scopes(self, user_id: str) -> list[dict]:
+    async def list_namespaces(self, user_id: str) -> list[dict]:
         async with self._sm() as s:
             rows2 = (await s.execute(
-                select(Memory.scope_id, func.count().label("total"))
+                select(Memory.namespace, func.count().label("total"))
                 .where(Memory.user_id == user_id)
-                .group_by(Memory.scope_id).order_by(func.count().desc())
+                .group_by(Memory.namespace).order_by(func.count().desc())
             )).all()
             active_rows = (await s.execute(
-                select(Memory.scope_id, func.count().label("active"))
+                select(Memory.namespace, func.count().label("active"))
                 .where((Memory.user_id == user_id) & (Memory.status == MemoryStatus.ACTIVE.value))
-                .group_by(Memory.scope_id)
+                .group_by(Memory.namespace)
             )).all()
         active_map = {r[0]: int(r[1]) for r in active_rows}
-        return [{"scope_id": r[0], "total": int(r[1]), "active": active_map.get(r[0], 0)} for r in rows2]
+        return [{"namespace": r[0], "total": int(r[1]), "active": active_map.get(r[0], 0)} for r in rows2]
 
-    async def compute_health_score(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def compute_health_score(self, user_id: str, namespace: str | None = None) -> dict:
         from datetime import datetime as _dt
         from datetime import timezone as _tz
-        units = await self.list_active(user_id, scope_id, limit=5000)
+        units = await self.list_active(user_id, namespace, limit=5000)
         if not units:
             return {"score": 0, "components": {}, "active_count": 0}
         now = _dt.now(_tz.utc)
@@ -419,8 +436,8 @@ class MemoryStore:
             "active_count": len(units),
         }
 
-    async def find_duplicates(self, user_id: str, scope_id: str | None = None, threshold: float = 0.80) -> list[dict]:
-        units = await self.list_active(user_id, scope_id, limit=500)
+    async def find_duplicates(self, user_id: str, namespace: str | None = None, threshold: float = 0.80) -> list[dict]:
+        units = await self.list_active(user_id, namespace, limit=500)
         if len(units) < 2:
             return []
         word_sets = [set(u.content.lower().split()) for u in units]
@@ -445,9 +462,9 @@ class MemoryStore:
         duplicates.sort(key=lambda d: d["similarity"], reverse=True)
         return duplicates
 
-    async def count_memories_since(self, user_id: str, scope_id: str | None, since_iso: str) -> int:
+    async def count_memories_since(self, user_id: str, namespace: str | None, since_iso: str) -> int:
         async with self._sm() as s:
-            cond = self._where_user_scope(user_id, scope_id) & (Memory.created_at >= since_iso)
+            cond = self._where_user_namespace(user_id, namespace) & (Memory.created_at >= since_iso)
             return (await s.execute(select(func.count()).where(cond))).scalar() or 0
 
     async def get_db_size(self) -> dict:
@@ -506,12 +523,12 @@ class MemoryStore:
     # Scope operations
     # ------------------------------------------------------------------
 
-    async def export_scope_json(self, user_id: str, scope_id: str | None = None) -> list[dict]:
-        units = await self.list_active(user_id, scope_id, limit=10000)
+    async def export_namespace_json(self, user_id: str, namespace: str | None = None) -> list[dict]:
+        units = await self.list_active(user_id, namespace, limit=10000)
         result = []
         for u in units:
             result.append({
-                "memory_id": u.memory_id, "scope_id": u.scope_id,
+                "memory_id": u.memory_id, "namespace": u.namespace,
                 "memory_type": u.memory_type.value, "content": u.content,
                 "source_session_id": u.source_session_id,
                 "source_turn_start": u.source_turn_start, "source_turn_end": u.source_turn_end,
@@ -523,8 +540,8 @@ class MemoryStore:
             })
         return result
 
-    async def export_csv(self, user_id: str, scope_id: str | None = None) -> str:
-        units = await self.list_active(user_id, scope_id, limit=10000)
+    async def export_csv(self, user_id: str, namespace: str | None = None) -> str:
+        units = await self.list_active(user_id, namespace, limit=10000)
         lines = ["memory_id,type,content,importance,confidence,access_count,created_at,tags"]
         for u in units:
             content = u.content.replace('"', '""')
@@ -532,7 +549,7 @@ class MemoryStore:
             lines.append(f'"{u.memory_id}","{u.memory_type.value}","{content}",{u.importance},{u.confidence},{u.access_count},"{u.created_at}","{tags}"')
         return "\n".join(lines)
 
-    async def import_memories_json(self, user_id: str, data: list[dict], target_scope_id: str | None = None) -> int:
+    async def import_memories_json(self, user_id: str, data: list[dict], target_namespace_id: str | None = None) -> int:
         import uuid as _uuid
         units = []
         for item in data:
@@ -540,11 +557,11 @@ class MemoryStore:
                 mt = MemoryType(item.get("memory_type", "episodic"))
             except ValueError:
                 mt = MemoryType.EPISODIC
-            scope = target_scope_id or item.get("scope_id", "default")
+            namespace = target_namespace_id or item.get("namespace", "default")
             units.append(MemoryUnit(
                 memory_id=str(_uuid.uuid4()),
                 user_id=user_id,
-                scope_id=scope,
+                namespace=namespace,
                 memory_type=mt,
                 content=item.get("content", ""),
                 source_session_id=item.get("source_session_id") or None,
@@ -561,29 +578,29 @@ class MemoryStore:
             ))
         return await self.add_memories(units)
 
-    async def snapshot_scope(self, user_id: str, scope_id: str | None = None) -> dict:
-        units = await self.export_scope_json(user_id, scope_id)
-        stats = await self.get_stats(user_id, scope_id)
-        return {"snapshot_at": _utc_now_iso(), "scope_id": scope_id, "stats": stats, "memories": units}
+    async def snapshot_namespace(self, user_id: str, namespace: str | None = None) -> dict:
+        units = await self.export_namespace_json(user_id, namespace)
+        stats = await self.get_stats(user_id, namespace)
+        return {"snapshot_at": _utc_now_iso(), "namespace": namespace, "stats": stats, "memories": units}
 
     async def restore_snapshot(self, user_id: str, snapshot: dict) -> int:
-        scope_id = snapshot.get("scope_id")
+        namespace = snapshot.get("namespace")
         memories = snapshot.get("memories", [])
         if not memories:
             return 0
-        current = await self.list_active(user_id, scope_id, limit=10000)
+        current = await self.list_active(user_id, namespace, limit=10000)
         if current:
             await self.bulk_archive([u.memory_id for u in current])
-        return await self.import_memories_json(user_id, memories, target_scope_id=scope_id)
+        return await self.import_memories_json(user_id, memories, target_namespace_id=namespace)
 
-    async def set_type_ttl(self, user_id: str, scope_id: str, memory_type: MemoryType, expires_at: str) -> int:
+    async def set_type_ttl(self, user_id: str, namespace: str, memory_type: MemoryType, expires_at: str) -> int:
         now = _utc_now_iso()
         async with self._sm() as s:
             result = await s.execute(
                 update(Memory)
                 .where(
                     (Memory.user_id == user_id)
-                    & (Memory.scope_id == scope_id)
+                    & self._namespace_cond(namespace)
                     & (Memory.memory_type == memory_type.value)
                     & (Memory.status == MemoryStatus.ACTIVE.value)
                 )
@@ -592,14 +609,14 @@ class MemoryStore:
             await s.commit()
         return result.rowcount or 0  # type: ignore[union-attr]
 
-    async def share_to_scope(self, memory_id: str, target_scope_id: str) -> str | None:
+    async def share_to_namespace(self, memory_id: str, target_namespace_id: str) -> str | None:
         import uuid as _uuid
         source = await self.get_by_id(memory_id)
         if source is None:
             return None
         new_id = str(_uuid.uuid4())
         shared = MemoryUnit(
-            memory_id=new_id, user_id=source.user_id, scope_id=target_scope_id,
+            memory_id=new_id, user_id=source.user_id, namespace=target_namespace_id,
             memory_type=source.memory_type, content=source.content,
             source_session_id=source.source_session_id,
             source_turn_start=source.source_turn_start, source_turn_end=source.source_turn_end,
@@ -625,7 +642,7 @@ class MemoryStore:
         entities = list(dict.fromkeys(a.entities + b.entities))[:12]
         topics = list(dict.fromkeys(a.topics + b.topics))[:12]
         merged = MemoryUnit(
-            memory_id=new_id, user_id=a.user_id, scope_id=a.scope_id, memory_type=a.memory_type,
+            memory_id=new_id, user_id=a.user_id, namespace=a.namespace, memory_type=a.memory_type,
             content=merged_content,
             source_session_id=a.source_session_id,
             source_turn_start=min(a.source_turn_start, b.source_turn_start),
@@ -648,7 +665,7 @@ class MemoryStore:
         source_terms = set(t.lower() for t in source.topics + source.entities)
         if not source_terms:
             return []
-        units = await self.list_active(source.user_id, source.scope_id, limit=500)
+        units = await self.list_active(source.user_id, source.namespace, limit=500)
         scored: list[tuple[MemoryUnit, float]] = []
         for u in units:
             if u.memory_id == memory_id:
@@ -685,9 +702,11 @@ class MemoryStore:
                     queue.append(sid)
         return sorted(history, key=lambda h: h["created_at"])
 
-    async def get_scope_analytics(self, user_id: str, scope_id: str) -> dict:
+    async def get_namespace_analytics(self, user_id: str, namespace: str) -> dict:
         async with self._sm() as s:
-            result = await s.execute(select(Memory).where(Memory.user_id == user_id).where(Memory.scope_id == scope_id))
+            result = await s.execute(
+                select(Memory).where(self._where_user_namespace(user_id, namespace))
+            )
             all_rows = result.scalars().all()
         if not all_rows:
             return {"total": 0}
@@ -717,27 +736,27 @@ class MemoryStore:
             },
         }
 
-    async def compare_scopes(self, user_id: str, scope_a: str | None, scope_b: str | None) -> dict:
-        units_a = await self.list_active(user_id, scope_a, limit=1000)
-        units_b = await self.list_active(user_id, scope_b, limit=1000)
+    async def compare_namespaces(self, user_id: str, namespace_a: str | None, namespace_b: str | None) -> dict:
+        units_a = await self.list_active(user_id, namespace_a, limit=1000)
+        units_b = await self.list_active(user_id, namespace_b, limit=1000)
         content_a = {u.content.strip().lower(): u for u in units_a}
         content_b = {u.content.strip().lower(): u for u in units_b}
         shared_keys = set(content_a.keys()) & set(content_b.keys())
         unique_a = set(content_a.keys()) - shared_keys
         unique_b = set(content_b.keys()) - shared_keys
         return {
-            "scope_a": scope_a, "scope_b": scope_b,
+            "namespace_a": namespace_a, "namespace_b": namespace_b,
             "scope_a_count": len(units_a), "scope_b_count": len(units_b),
             "shared_count": len(shared_keys), "unique_to_a": len(unique_a), "unique_to_b": len(unique_b),
             "shared_content": [content_a[k].content[:100] for k in list(shared_keys)[:5]],
         }
 
-    async def garbage_collect(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def garbage_collect(self, user_id: str, namespace: str | None = None) -> dict:
         async with self._sm() as s:
-            cond = self._where_user_scope(user_id, scope_id) & (Memory.status == MemoryStatus.SUPERSEDED.value)
+            cond = self._where_user_namespace(user_id, namespace) & (Memory.status == MemoryStatus.SUPERSEDED.value)
             result = await s.execute(select(Memory.memory_id).where(cond))
             superseded_ids = {r[0] for r in result.all()}
-        active_units = await self.list_active(user_id, scope_id, limit=10000)
+        active_units = await self.list_active(user_id, namespace, limit=10000)
         referenced = {sid for u in active_units for sid in u.supersedes}
         orphans = superseded_ids - referenced
         if orphans:
@@ -746,8 +765,8 @@ class MemoryStore:
                 await s.commit()
         return {"removed": len(orphans), "kept_superseded": len(superseded_ids) - len(orphans)}
 
-    async def sample_memories(self, user_id: str, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
-        units = await self.list_active(user_id, scope_id, limit=500)
+    async def sample_memories(self, user_id: str, namespace: str | None = None, count: int = 5) -> list[MemoryUnit]:
+        units = await self.list_active(user_id, namespace, limit=500)
         if len(units) <= count:
             return units
         import random

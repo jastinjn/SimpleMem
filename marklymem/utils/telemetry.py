@@ -120,7 +120,7 @@ def trace(
     name: str,
     *,
     user_id: str | None = "",
-    scope_id: str | None = "",
+    namespace: str | None = "",
     session_id: str | None = "",
     input: Any = None,
     **attrs: Any,
@@ -138,8 +138,8 @@ def trace(
             sp.set_attribute("langfuse.session.id", session_id)
         if user_id:
             sp.set_attribute("langfuse.user.id", user_id)
-        if scope_id:
-            sp.set_attribute("langfuse.trace.metadata.scope_id", scope_id)
+        if namespace:
+            sp.set_attribute("langfuse.trace.metadata.namespace", namespace)
         _apply(sp, attrs)
         if input is not None:
             set_input(sp, input)

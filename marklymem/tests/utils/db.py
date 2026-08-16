@@ -3,7 +3,7 @@
 
 Corpus layout (returned by create_test_units):
   USER_ID  + SCOPE       — 6 units (unit-001..006): diverse types / topics
-  USER_ID  + OTHER_SCOPE — 2 units (unit-s01..s02): Terraform / CloudFormation
+  USER_ID  + OTHER_NAMESPACE — 2 units (unit-s01..s02): Terraform / CloudFormation
   OTHER_USER + SCOPE     — 1 unit  (unit-u01):       Ansible
 
 All updated_at values are distinct so any (score, updated_at) sort is total.
@@ -17,11 +17,11 @@ from marklymem.evolver.models import MemoryType, MemoryUnit
 USER_ID = "user-test"
 OTHER_USER = "user-bob"
 SCOPE = "test"
-OTHER_SCOPE = "test-b"
+OTHER_NAMESPACE = "test-b"
 
 # --- Corpus size constants ---
 CORPUS_SIZE = 6       # units for USER_ID + SCOPE
-OTHER_SCOPE_SIZE = 2  # units for USER_ID + OTHER_SCOPE
+OTHER_NAMESPACE_SIZE = 2  # units for USER_ID + OTHER_NAMESPACE
 OTHER_USER_SIZE = 1   # units for OTHER_USER + SCOPE
 
 
@@ -31,11 +31,11 @@ def create_test_units() -> list[MemoryUnit]:
         return f"2025-01-15T14:00:{n:02d}+00:00"
 
     return [
-        # --- primary user, primary scope ---
+        # --- primary user, primary namespace ---
         MemoryUnit(
             memory_id="unit-001",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.SEMANTIC,
             content="The project uses PostgreSQL as the primary database",
             entities=["PostgreSQL", "database"],
@@ -49,7 +49,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-002",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.EPISODIC,
             content="Alice and Bob discussed the authentication strategy for the API",
             entities=["Alice", "Bob", "API"],
@@ -63,7 +63,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-003",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.PREFERENCE,
             content="User prefers TypeScript over JavaScript for frontend development",
             entities=["TypeScript", "JavaScript"],
@@ -77,7 +77,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-004",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.PROJECT_STATE,
             content="The deployment pipeline uses Kubernetes for container orchestration",
             entities=["Kubernetes", "deployment"],
@@ -91,7 +91,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-005",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.PROCEDURAL_OBSERVATION,
             content="Running tests requires the pytest framework with coverage enabled",
             entities=["pytest"],
@@ -105,7 +105,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-006",
             user_id=USER_ID,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.SEMANTIC,
             content="Redis is used for caching session tokens and rate limiting",
             entities=["Redis", "session"],
@@ -116,11 +116,11 @@ def create_test_units() -> list[MemoryUnit]:
             created_at=ts(6),
             updated_at=ts(6),
         ),
-        # --- primary user, secondary scope ---
+        # --- primary user, secondary namespace ---
         MemoryUnit(
             memory_id="unit-s01",
             user_id=USER_ID,
-            scope_id=OTHER_SCOPE,
+            namespace=OTHER_NAMESPACE,
             memory_type=MemoryType.SEMANTIC,
             content="The team uses Terraform for infrastructure provisioning",
             entities=["Terraform"],
@@ -134,7 +134,7 @@ def create_test_units() -> list[MemoryUnit]:
         MemoryUnit(
             memory_id="unit-s02",
             user_id=USER_ID,
-            scope_id=OTHER_SCOPE,
+            namespace=OTHER_NAMESPACE,
             memory_type=MemoryType.SEMANTIC,
             content="We deploy services to AWS using CloudFormation",
             entities=["AWS", "CloudFormation"],
@@ -145,11 +145,11 @@ def create_test_units() -> list[MemoryUnit]:
             created_at=ts(8),
             updated_at=ts(8),
         ),
-        # --- secondary user, primary scope ---
+        # --- secondary user, primary namespace ---
         MemoryUnit(
             memory_id="unit-u01",
             user_id=OTHER_USER,
-            scope_id=SCOPE,
+            namespace=SCOPE,
             memory_type=MemoryType.SEMANTIC,
             content="We use Ansible for configuration management",
             entities=["Ansible"],
@@ -167,7 +167,7 @@ def make_unit(
     memory_id: str,
     *,
     user_id: str,
-    scope_id: str,
+    namespace: str,
     content: str = "Test memory content",
     memory_type: MemoryType = MemoryType.SEMANTIC,
 ) -> MemoryUnit:
@@ -176,7 +176,7 @@ def make_unit(
     return MemoryUnit(
         memory_id=memory_id,
         user_id=user_id,
-        scope_id=scope_id,
+        namespace=namespace,
         memory_type=memory_type,
         content=content,
         entities=[],

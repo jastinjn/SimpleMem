@@ -34,7 +34,7 @@ class MemoryRetriever:
             "memory.retrieve",
             session_id=query.session_id,
             user_id=query.user_id,
-            scope_id=query.scope_id,
+            namespace=query.namespace,
             input=query.query_text,
         ) as root:
             mode = self.retrieval_mode
@@ -46,15 +46,15 @@ class MemoryRetriever:
 
             if mode == "embedding":
                 hits = await self._retrieve_embedding(query)
-                logger.info("[Retriever] mode=embedding scope=%s hits=%d", query.scope_id, len(hits))
+                logger.info("[Retriever] mode=embedding namespace=%s hits=%d", query.namespace, len(hits))
             elif mode == "hybrid":
                 hits = await self._retrieve_hybrid(query)
-                logger.info("[Retriever] mode=hybrid scope=%s hits=%d", query.scope_id, len(hits))
+                logger.info("[Retriever] mode=hybrid namespace=%s hits=%d", query.namespace, len(hits))
             else:
                 limit = min(query.top_k, self.policy.max_injected_units)
                 hits = await self.store.search_keyword(
                     query.user_id,
-                    query.scope_id,
+                    query.namespace,
                     query_text=query.query_text,
                     limit=limit,
                 )
@@ -62,8 +62,8 @@ class MemoryRetriever:
                 if query.context_tags:
                     hits = _apply_tag_boost(hits, query.context_tags)
                 logger.info(
-                    "[Retriever] mode=keyword scope=%s hits=%d",
-                    query.scope_id, len(hits),
+                    "[Retriever] mode=keyword namespace=%s hits=%d",
+                    query.namespace, len(hits),
                 )
 
             root.set_attribute("result_count", len(hits))
@@ -106,13 +106,13 @@ class MemoryRetriever:
 
         # Source candidates from both keyword and (if available) vector search.
         kw_hits = await self.store.search_keyword(
-            query.user_id, query.scope_id, query_text=query.query_text, limit=limit
+            query.user_id, query.namespace, query_text=query.query_text, limit=limit
         )
         kw_units = {h.unit.memory_id: h.unit for h in kw_hits}
 
         if query_embedding:
             vec_units = await self.store.search_vector(
-                query.user_id, query.scope_id, query_embedding=query_embedding, limit=limit
+                query.user_id, query.namespace, query_embedding=query_embedding, limit=limit
             )
             for u in vec_units:
                 kw_units.setdefault(u.memory_id, u)
@@ -202,7 +202,7 @@ class MemoryRetriever:
         limit = min(query.top_k * 3, 100)
         hits: list[MemorySearchHit] = []
         for unit in await self.store.search_vector(
-            query.user_id, query.scope_id, query_embedding=query_embedding, limit=limit
+            query.user_id, query.namespace, query_embedding=query_embedding, limit=limit
         ):
             if query.include_types and unit.memory_type not in query.include_types:
                 continue

@@ -20,7 +20,7 @@ class TestMemoryUnit:
         u = MemoryUnit(
             memory_id="m1",
             user_id="user-test",
-            scope_id="s1",
+            namespace="s1",
             memory_type=MemoryType.SEMANTIC,
             content="some content",
             created_at="2025-01-01T00:00:00+00:00",
@@ -37,12 +37,12 @@ class TestMemoryUnit:
 
     def test_list_fields_are_independent(self):
         u1 = MemoryUnit(
-            memory_id="m1", user_id="user-test", scope_id="s", memory_type=MemoryType.SEMANTIC,
+            memory_id="m1", user_id="user-test", namespace="s", memory_type=MemoryType.SEMANTIC,
             content="a", created_at="2025-01-01T00:00:00+00:00",
             updated_at="2025-01-01T00:00:00+00:00",
         )
         u2 = MemoryUnit(
-            memory_id="m2", user_id="user-test", scope_id="s", memory_type=MemoryType.SEMANTIC,
+            memory_id="m2", user_id="user-test", namespace="s", memory_type=MemoryType.SEMANTIC,
             content="b", created_at="2025-01-01T00:00:01+00:00",
             updated_at="2025-01-01T00:00:01+00:00",
         )
@@ -51,7 +51,7 @@ class TestMemoryUnit:
 
     def test_explicit_timestamps_preserved(self):
         u = MemoryUnit(
-            memory_id="m1", user_id="user-test", scope_id="s", memory_type=MemoryType.EPISODIC,
+            memory_id="m1", user_id="user-test", namespace="s", memory_type=MemoryType.EPISODIC,
             content="c",
             created_at="2025-06-01T10:00:00+00:00",
             updated_at="2025-06-02T10:00:00+00:00",
@@ -62,14 +62,14 @@ class TestMemoryUnit:
 
 class TestMemoryQuery:
     def test_defaults(self):
-        q = MemoryQuery(user_id="user-test", scope_id="s", query_text="hello")
+        q = MemoryQuery(user_id="user-test", namespace="s", query_text="hello")
         assert q.top_k == 6
         assert q.max_tokens == 800
         assert q.include_types == []
         assert q.context_tags == []
 
     def test_custom_values(self):
-        q = MemoryQuery(user_id="user-test", scope_id="s", query_text="x", top_k=3, max_tokens=200)
+        q = MemoryQuery(user_id="user-test", namespace="s", query_text="x", top_k=3, max_tokens=200)
         assert q.top_k == 3
         assert q.max_tokens == 200
 
@@ -77,7 +77,7 @@ class TestMemoryQuery:
 class TestMemorySearchHit:
     def test_defaults(self):
         u = MemoryUnit(
-            memory_id="m1", user_id="user-test", scope_id="s", memory_type=MemoryType.SEMANTIC,
+            memory_id="m1", user_id="user-test", namespace="s", memory_type=MemoryType.SEMANTIC,
             content="c", created_at="2025-01-01T00:00:00+00:00",
             updated_at="2025-01-01T00:00:00+00:00",
         )

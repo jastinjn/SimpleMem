@@ -32,7 +32,7 @@ class MemoryManager:
         store: MemoryStore,
         policy: MemoryPolicy | None = None,
         user_id: str = "",
-        scope_id: str = "default",
+        namespace: str = "default",
         auto_consolidate: bool = True,
         retrieval_mode: str = "keyword",
         use_embeddings: bool = False,
@@ -45,7 +45,7 @@ class MemoryManager:
         self.store = store
         self.policy = policy or MemoryPolicy()
         self.user_id = user_id
-        self.scope_id = scope_id
+        self.namespace = namespace
         self.auto_consolidate = auto_consolidate
         self.retrieval_mode = retrieval_mode
         self.ingestion_mode = ingestion_mode
@@ -71,7 +71,7 @@ class MemoryManager:
     def register_event_callback(self, callback: Callable) -> None:
         """Register a callback for memory events.
 
-        Callbacks receive a dict with at least 'event' (str) and 'scope_id' (str).
+        Callbacks receive a dict with at least 'event' (str) and 'namespace' (str).
         Additional keys depend on the event type.
         """
         self._event_callbacks.append(callback)
@@ -92,7 +92,7 @@ class MemoryManager:
         session_id: str | None,
         turns: list[dict],
         user_id: str | None = None,
-        scope_id: str | None = None,
+        namespace: str | None = None,
     ) -> dict[str, int]:
         """Create memory units from a completed session.
 
@@ -104,11 +104,11 @@ class MemoryManager:
         Returns a dict with keys: ``added``, ``superseded``, ``decayed``, ``reinforced``.
         """
         uid = user_id or self.user_id
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         with telemetry.trace(
-            "memory.ingest", session_id=session_id, user_id=uid, scope_id=scope, input=turns
+            "memory.ingest", session_id=session_id, user_id=uid, namespace=namespace, input=turns
         ) as root:
-            result = await self._ingest_session_turns(session_id, turns, uid, scope)
+            result = await self._ingest_session_turns(session_id, turns, uid, ns)
             root.set_attribute("added", result["added"])
             root.set_attribute("superseded", result["superseded"])
             root.set_attribute("decayed", result["decayed"])
@@ -120,7 +120,7 @@ class MemoryManager:
         session_id: str | None,
         turns: list[dict],
         uid: str,
-        scope: str,
+        ns: str,
     ) -> dict[str, int]:
         """Inner ingestion pipeline; wrapped by :meth:`ingest_session_turns` in a root span."""
         mode = self.ingestion_mode
@@ -130,7 +130,7 @@ class MemoryManager:
             units = await self.llm_extractor.extract_session(
                 turns=turns,
                 user_id=uid,
-                scope_id=scope,
+                namespace=ns,
                 session_id=session_id,
             )
         else:
@@ -141,7 +141,7 @@ class MemoryManager:
                     return []
                 extracted = await _extract_memory_units_for_turn(
                     user_id=uid,
-                    scope_id=scope,
+                    namespace=ns,
                     session_id=session_id,
                     turn_index=idx,
                     prompt_text=prompt_text,
@@ -171,7 +171,7 @@ class MemoryManager:
 
         # Pre-ingestion dedup: skip units whose content already exists in the store.
         pre_dedup_count = len(units)
-        units = await _dedup_against_store(units, self.store, uid, scope)
+        units = await _dedup_against_store(units, self.store, uid, ns)
         dedup_skipped = pre_dedup_count - len(units)
         if dedup_skipped or (pre_validate_count - pre_dedup_count):
             logger.info(
@@ -190,10 +190,10 @@ class MemoryManager:
             )
 
         # Detect potential conflicts with existing memories.
-        conflicts = await _detect_conflicts(units, self.store, uid, scope)
+        conflicts = await _detect_conflicts(units, self.store, uid, ns)
         if conflicts:
             logger.info("[Memory] detected %d conflicts with existing memories", len(conflicts))
-            self._notify("conflicts_detected", scope_id=scope, count=len(conflicts))
+            self._notify("conflicts_detected", namespace=ns, count=len(conflicts))
 
         if self.embedder is not None:
             texts = [
@@ -209,22 +209,22 @@ class MemoryManager:
         consolidation_result: dict[str, int] = {}
         if self.auto_consolidate:
             with telemetry.span("consolidate") as cons_span:
-                consolidation_result = await self.consolidator.consolidate(uid, scope)
+                consolidation_result = await self.consolidator.consolidate(uid, ns)
                 cons_span.set_attribute("superseded", consolidation_result.get("superseded", 0))
                 cons_span.set_attribute("decayed", consolidation_result.get("decayed", 0))
                 cons_span.set_attribute("reinforced", consolidation_result.get("reinforced", 0))
                 if consolidation_result.get("dropped"):
                     telemetry.set_output(cons_span, consolidation_result["dropped"])
-        stats = await summarize_memory_store(self.store, uid, scope)
+        stats = await summarize_memory_store(self.store, uid, ns)
         logger.info(
-            "[Memory] ingested %d memory units from session=%s scope=%s active=%d dominant_type=%s",
+            "[Memory] ingested %d memory units from session=%s namespace=%s active=%d dominant_type=%s",
             added,
             session_id,
-            scope,
+            ns,
             stats.get("active", 0),
             stats.get("dominant_type", ""),
         )
-        self._notify("ingest", scope_id=scope, session_id=session_id, added=added)
+        self._notify("ingest", namespace=ns, session_id=session_id, added=added)
         return {
             "added": added,
             "superseded": consolidation_result.get("superseded", 0),
@@ -237,7 +237,7 @@ class MemoryManager:
             return ""
         lines = ["## Relevant Long-Term Memory"]
         if include_pool_context:
-            stats = await self.get_scope_stats()
+            stats = await self.get_namespace_stats()
             active = stats.get("active", 0)
             types = stats.get("type_count", 0)
             lines.append(f"_Pool: {active} memories across {types} types. Showing top {len(units)}._")
@@ -265,13 +265,13 @@ class MemoryManager:
                         lines.append(f"- {text}")
         return "\n".join(lines).strip()
 
-    async def get_scope_stats(self, user_id: str | None = None, scope_id: str | None = None) -> dict:
-        return await summarize_memory_store(self.store, user_id or self.user_id, scope_id)
+    async def get_namespace_stats(self, user_id: str | None = None, namespace: str | None = None) -> dict:
+        return await summarize_memory_store(self.store, user_id or self.user_id, namespace)
 
-    async def get_access_patterns(self, scope_id: str | None = None, limit: int = 5) -> dict:
-        """Return access pattern insights for the given scope."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+    async def get_access_patterns(self, namespace: str | None = None, limit: int = 5) -> dict:
+        """Return access pattern insights for the given ns."""
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         if not units:
             return {"total": 0, "most_accessed": [], "never_accessed": 0}
         sorted_by_access = sorted(units, key=lambda u: u.access_count, reverse=True)
@@ -288,21 +288,21 @@ class MemoryManager:
             "avg_access_count": round(avg_access, 2),
         }
 
-    async def diagnose(self, scope_id: str | None = None) -> dict:
+    async def diagnose(self, namespace: str | None = None) -> dict:
         """Return a diagnostic summary for operator debugging.
 
         Combines store stats, policy state, access patterns, and retrieval
         telemetry into a single view for quick health assessment.
         """
-        scope = scope_id or self.scope_id
-        stats = await self.get_scope_stats(scope)
-        access = await self.get_access_patterns(scope)
+        ns = namespace or self.namespace
+        stats = await self.get_namespace_stats(ns)
+        access = await self.get_access_patterns(ns)
 
         # Memory age distribution.
         from datetime import datetime, timezone
 
         age_buckets = {"<1h": 0, "<24h": 0, "<7d": 0, "older": 0}
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         now = datetime.now(timezone.utc)
         for u in units:
             try:
@@ -345,7 +345,7 @@ class MemoryManager:
             issues.append(f"{ttl_expiring_soon} memories expiring within 24 hours")
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "store": {
                 "active": stats.get("active", 0),
                 "dominant_type": stats.get("dominant_type", ""),
@@ -368,14 +368,14 @@ class MemoryManager:
             "issues": issues,
         }
 
-    async def detect_conflicts(self, scope_id: str | None = None) -> list[dict]:
+    async def detect_conflicts(self, namespace: str | None = None) -> list[dict]:
         """Detect potential contradictions within the active memory pool.
 
         Compares all active memories of the same type that share significant
         topic/entity overlap but have different content.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         if len(units) < 2:
             return []
 
@@ -403,17 +403,17 @@ class MemoryManager:
     async def explain_retrieval(
         self,
         task_description: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
     ) -> list[dict]:
         """Return detailed retrieval results with scoring explanations.
 
         Useful for operator debugging: shows why each memory was selected
         and its contribution to the final result.
         """
-        effective_scope = scope_id or self.scope_id
+        effective_scope = namespace or self.namespace
         query = MemoryQuery(
             user_id=self.user_id,
-            scope_id=effective_scope,
+            namespace=effective_scope,
             query_text=task_description,
             top_k=self.policy.max_injected_units,
             max_tokens=self.policy.max_injected_tokens,
@@ -433,9 +433,9 @@ class MemoryManager:
             for h in hits
         ]
 
-    async def list_scopes(self) -> list[dict]:
+    async def list_namespaces(self) -> list[dict]:
         """List all scopes in the store with memory counts."""
-        return await self.store.list_scopes(self.user_id)
+        return await self.store.list_namespaces(self.user_id)
 
     async def update_memory(self, memory_id: str, content: str) -> bool:
         """Update the content of an existing memory."""
@@ -456,44 +456,44 @@ class MemoryManager:
         result = await self.store.set_ttl(memory_id, expires_at)
         return result
 
-    async def expire_stale(self, scope_id: str | None = None) -> int:
+    async def expire_stale(self, namespace: str | None = None) -> int:
         """Archive all memories that have passed their TTL."""
-        scope = scope_id or self.scope_id
-        count = await self.store.expire_stale(self.user_id, scope)
+        ns = namespace or self.namespace
+        count = await self.store.expire_stale(self.user_id, ns)
         if count:
-            self._notify("expire", scope_id=scope, expired_count=count)
+            self._notify("expire", namespace=namespace, expired_count=count)
         return count
 
-    async def share_memory(self, memory_id: str, target_scope_id: str) -> str | None:
-        """Copy a memory to another scope for cross-scope knowledge sharing.
+    async def share_memory(self, memory_id: str, target_namespace_id: str) -> str | None:
+        """Copy a memory to another namespace for cross-namespace knowledge sharing.
 
-        Returns the new memory ID in the target scope.
+        Returns the new memory ID in the target ns.
         """
-        new_id = await self.store.share_to_scope(memory_id, target_scope_id)
+        new_id = await self.store.share_to_namespace(memory_id, target_namespace_id)
         if new_id:
-            self._notify("share", memory_id=memory_id, target_scope_id=target_scope_id, new_id=new_id)
+            self._notify("share", memory_id=memory_id, target_namespace_id=target_namespace_id, new_id=new_id)
         return new_id
 
-    async def export_scope(self, scope_id: str | None = None) -> list[dict]:
-        """Export all active memories for a scope as JSON-serializable dicts."""
-        scope = scope_id or self.scope_id
-        return await self.store.export_scope_json(self.user_id, scope)
+    async def export_scope(self, namespace: str | None = None) -> list[dict]:
+        """Export all active memories for a namespace as JSON-serializable dicts."""
+        ns = namespace or self.namespace
+        return await self.store.export_namespace_json(self.user_id, ns)
 
-    async def import_memories(self, data: list[dict], target_scope_id: str | None = None) -> int:
+    async def import_memories(self, data: list[dict], target_namespace_id: str | None = None) -> int:
         """Import memories from JSON dicts into the store."""
-        scope = target_scope_id or self.scope_id
-        count = await self.store.import_memories_json(self.user_id, data, scope)
+        ns = target_namespace_id or self.namespace
+        count = await self.store.import_memories_json(self.user_id, data, ns)
         return count
 
     async def set_type_ttl(
         self,
         memory_type: MemoryType,
         expires_at: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
     ) -> int:
         """Set TTL on all active memories of a given type."""
-        scope = scope_id or self.scope_id
-        count = await self.store.set_type_ttl(self.user_id, scope, memory_type, expires_at)
+        ns = namespace or self.namespace
+        count = await self.store.set_type_ttl(self.user_id, ns, memory_type, expires_at)
         return count
 
     async def merge_memories(self, id_a: str, id_b: str, merged_content: str) -> str | None:
@@ -507,10 +507,10 @@ class MemoryManager:
         """Get version history for a memory through its supersedes chain."""
         return await self.store.get_memory_history(memory_id)
 
-    async def get_scope_analytics(self, scope_id: str | None = None) -> dict:
-        """Get comprehensive analytics for a scope."""
-        scope = scope_id or self.scope_id
-        return await self.store.get_scope_analytics(self.user_id, scope)
+    async def get_namespace_analytics(self, namespace: str | None = None) -> dict:
+        """Get comprehensive analytics for a ns."""
+        ns = namespace or self.namespace
+        return await self.store.get_namespace_analytics(self.user_id, ns)
 
     async def add_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Add user-defined tags to a memory."""
@@ -522,23 +522,23 @@ class MemoryManager:
         result = await self.store.remove_tags(memory_id, tags)
         return result
 
-    async def search_by_tag(self, tag: str, scope_id: str | None = None, limit: int = 50) -> list[MemoryUnit]:
+    async def search_by_tag(self, tag: str, namespace: str | None = None, limit: int = 50) -> list[MemoryUnit]:
         """Find all active memories with a given tag."""
-        scope = scope_id or self.scope_id
-        return await self.store.search_by_tag(self.user_id, scope, tag, limit)
+        ns = namespace or self.namespace
+        return await self.store.search_by_tag(self.user_id, ns, tag, limit)
 
     async def bulk_archive(self, memory_ids: list[str]) -> int:
         """Archive multiple memories at once."""
         count = await self.store.bulk_archive(memory_ids)
         return count
 
-    async def snapshot_scope(self, scope_id: str | None = None) -> dict:
+    async def snapshot_namespace(self, namespace: str | None = None) -> dict:
         """Create a point-in-time snapshot for potential rollback."""
-        scope = scope_id or self.scope_id
-        return await self.store.snapshot_scope(self.user_id, scope)
+        ns = namespace or self.namespace
+        return await self.store.snapshot_namespace(self.user_id, ns)
 
     async def restore_snapshot(self, snapshot: dict) -> int:
-        """Restore a scope from a previous snapshot."""
+        """Restore a namespace from a previous snapshot."""
         count = await self.store.restore_snapshot(self.user_id, snapshot)
         return count
 
@@ -555,20 +555,20 @@ class MemoryManager:
             for u, score in results
         ]
 
-    async def get_health_score(self, scope_id: str | None = None) -> dict:
+    async def get_health_score(self, namespace: str | None = None) -> dict:
         """Get a composite health score (0-100) for the memory pool."""
-        scope = scope_id or self.scope_id
-        return await self.store.compute_health_score(self.user_id, scope)
+        ns = namespace or self.namespace
+        return await self.store.compute_health_score(self.user_id, ns)
 
-    async def find_duplicates(self, scope_id: str | None = None, threshold: float = 0.80) -> list[dict]:
+    async def find_duplicates(self, namespace: str | None = None, threshold: float = 0.80) -> list[dict]:
         """Find near-duplicate memory pairs by content similarity."""
-        scope = scope_id or self.scope_id
-        return await self.store.find_duplicates(self.user_id, scope, threshold)
+        ns = namespace or self.namespace
+        return await self.store.find_duplicates(self.user_id, ns, threshold)
 
-    async def consolidation_dry_run(self, scope_id: str | None = None) -> dict:
+    async def consolidation_dry_run(self, namespace: str | None = None) -> dict:
         """Preview what consolidation would do without applying changes."""
-        scope = scope_id or self.scope_id
-        return await self.consolidator.dry_run(self.user_id, scope)
+        ns = namespace or self.namespace
+        return await self.consolidator.dry_run(self.user_id, ns)
 
     async def search_advanced(
         self,
@@ -576,25 +576,25 @@ class MemoryManager:
         memory_type: str = "",
         tag: str = "",
         min_importance: float = 0.0,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 50,
     ) -> list[MemoryUnit]:
         """Search memories with combined criteria."""
-        scope = scope_id or self.scope_id
-        return await self.store.search_advanced(self.user_id, scope, keyword, memory_type, tag, min_importance, limit)
+        ns = namespace or self.namespace
+        return await self.store.search_advanced(self.user_id, ns, keyword, memory_type, tag, min_importance, limit)
 
-    async def compare_scopes(self, scope_a: str, scope_b: str) -> dict:
+    async def compare_namespaces(self, namespace_a: str, namespace_b: str) -> dict:
         """Compare two scopes to find shared and unique memories."""
-        return await self.store.compare_scopes(self.user_id, scope_a, scope_b)
+        return await self.store.compare_namespaces(self.user_id, namespace_a, namespace_b)
 
-    async def auto_resolve_conflicts(self, scope_id: str | None = None) -> dict:
+    async def auto_resolve_conflicts(self, namespace: str | None = None) -> dict:
         """Automatically resolve conflicts by superseding older memories.
 
         When two same-type memories overlap significantly but have different
         content, the older one is superseded by the newer one.
         """
-        scope = scope_id or self.scope_id
-        conflicts = await self.detect_conflicts(scope)
+        ns = namespace or self.namespace
+        conflicts = await self.detect_conflicts(ns)
         if not conflicts:
             return {"resolved": 0}
 
@@ -618,17 +618,17 @@ class MemoryManager:
             resolved += 1
 
         result = {"resolved": resolved, "total_conflicts": len(conflicts)}
-        self._notify("conflict_resolution", scope_id=scope, **result)
+        self._notify("conflict_resolution", namespace=namespace, **result)
         return result
 
-    async def rebalance_importance(self, scope_id: str | None = None) -> dict:
+    async def rebalance_importance(self, namespace: str | None = None) -> dict:
         """Rebalance importance distribution to prevent clustering.
 
         If too many memories have the same importance value, spread them
         out to improve retrieval differentiation.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if len(units) < 5:
             return {"adjusted": 0}
 
@@ -678,13 +678,13 @@ class MemoryManager:
             helpful = helpful.lower() in ("positive", "true", "yes", "1", "helpful")
         await self.store.record_feedback(memory_id, helpful)
 
-    async def get_pool_summary(self, scope_id: str | None = None, max_per_type: int = 3) -> str:
+    async def get_pool_summary(self, namespace: str | None = None, max_per_type: int = 3) -> str:
         """Generate a concise summary of the entire memory pool.
 
         Returns a human-readable overview useful for operator inspection.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         if not units:
             return "No active memories."
 
@@ -703,7 +703,7 @@ class MemoryManager:
             if len(group) > max_per_type:
                 lines.append(f"  ... and {len(group) - max_per_type} more")
 
-        conflicts = await self.detect_conflicts(scope)
+        conflicts = await self.detect_conflicts(ns)
         if conflicts:
             lines.append(f"\nPotential conflicts: {len(conflicts)}")
             for c in conflicts[:3]:
@@ -714,7 +714,7 @@ class MemoryManager:
     async def search_memories(
         self,
         query_text: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
         """Search memories by keyword with scoring information.
@@ -722,8 +722,8 @@ class MemoryManager:
         Returns dictionaries with memory details and relevance scores.
         Useful for operator debugging and inspection.
         """
-        scope = scope_id or self.scope_id
-        hits = await self.store.search_keyword(self.user_id, scope,query_text, limit=limit)
+        ns = namespace or self.namespace
+        hits = await self.store.search_keyword(self.user_id, ns,query_text, limit=limit)
         return [
             {
                 "memory_id": h.unit.memory_id,
@@ -760,7 +760,7 @@ class MemoryManager:
 
     async def apply_retention_policy(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         max_age_days: int = 90,
         min_importance: float = 0.3,
         min_access_count: int = 0,
@@ -773,8 +773,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
         to_archive_ids: list[str] = []
@@ -802,11 +802,11 @@ class MemoryManager:
         if to_archive_ids:
             await self.store.bulk_archive(to_archive_ids)
 
-        return {"archived": archived, "scope_id": scope}
+        return {"archived": archived, "namespace": ns}
 
     async def apply_typed_retention(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         type_policies: dict[str, dict] | None = None,
     ) -> dict:
         """Apply per-type retention policies.
@@ -816,7 +816,7 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         defaults: dict[str, dict] = {
             "episodic": {"max_age_days": 30, "min_importance": 0.2, "min_access_count": 0},
             "semantic": {"max_age_days": 180, "min_importance": 0.3, "min_access_count": 0},
@@ -828,7 +828,7 @@ class MemoryManager:
             for k, v in type_policies.items():
                 defaults[k] = {**defaults.get(k, {}), **v}
 
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         archived = 0
         to_archive_ids: list[str] = []
@@ -855,11 +855,11 @@ class MemoryManager:
 
         if to_archive_ids:
             await self.store.bulk_archive(to_archive_ids)
-        return {"archived": archived, "scope_id": scope}
+        return {"archived": archived, "namespace": ns}
 
     async def apply_adaptive_ttl(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         base_days: dict[str, int] | None = None,
     ) -> dict:
         """Set TTL on memories based on type and access patterns.
@@ -871,7 +871,7 @@ class MemoryManager:
         """
         from datetime import datetime, timedelta, timezone
 
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         defaults = {
             "episodic": 30,
             "semantic": 90,
@@ -882,7 +882,7 @@ class MemoryManager:
         if base_days:
             defaults.update(base_days)
 
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
         for u in units:
@@ -901,11 +901,11 @@ class MemoryManager:
             await self.store.set_ttl(u.memory_id, expires.isoformat(timespec="seconds"))
             updated += 1
 
-        return {"updated": updated, "scope_id": scope}
+        return {"updated": updated, "namespace": ns}
 
     async def batch_archive_by_criteria(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         max_quality_score: float | None = None,
         memory_type: MemoryType | None = None,
         max_importance: float | None = None,
@@ -918,8 +918,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         to_archive: list[str] = []
 
@@ -949,7 +949,7 @@ class MemoryManager:
         if to_archive:
             await self.store.bulk_archive(to_archive)
 
-        return {"archived": len(to_archive), "scope_id": scope}
+        return {"archived": len(to_archive), "namespace": ns}
 
     async def score_memory_quality(self, memory_id: str) -> dict:
         """Compute a quality score (0-100) for a single memory unit.
@@ -996,10 +996,10 @@ class MemoryManager:
             },
         }
 
-    async def get_lowest_quality_memories(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
-        """Get the lowest-quality active memories in a scope for review/cleanup."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+    async def get_lowest_quality_memories(self, namespace: str | None = None, limit: int = 10) -> list[dict]:
+        """Get the lowest-quality active memories in a namespace for review/cleanup."""
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         scored = []
         for u in units:
             result = await self.score_memory_quality(u.memory_id)
@@ -1010,14 +1010,14 @@ class MemoryManager:
         return scored[:limit]
 
     async def migrate_scope(self, from_scope: str, to_scope: str) -> dict:
-        """Move all active memories from one scope to another.
+        """Move all active memories from one namespace to another.
 
-        Memories are copied to the new scope and archived in the old scope.
+        Memories are copied to the new namespace and archived in the old ns.
         """
         units = await self.store.list_active(self.user_id, from_scope, limit=10000)
         migrated = 0
         for u in units:
-            new_id = await self.store.share_to_scope(u.memory_id, to_scope)
+            new_id = await self.store.share_to_namespace(u.memory_id, to_scope)
             if new_id:
                 migrated += 1
         if migrated:
@@ -1026,12 +1026,12 @@ class MemoryManager:
         self._notify("scope_migration", from_scope=from_scope, to_scope=to_scope, migrated=migrated)
         return {"migrated": migrated, "from_scope": from_scope, "to_scope": to_scope}
 
-    async def get_age_distribution(self, scope_id: str | None = None) -> dict:
+    async def get_age_distribution(self, namespace: str | None = None) -> dict:
         """Get age distribution of active memories in named buckets."""
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         buckets = {"< 1 day": 0, "1-7 days": 0, "1-4 weeks": 0, "1-3 months": 0, "3+ months": 0}
 
@@ -1058,13 +1058,13 @@ class MemoryManager:
 
     async def find_cross_scope_duplicates(
         self,
-        scope_a: str,
-        scope_b: str,
+        namespace_a: str,
+        namespace_b: str,
         threshold: float = 0.80,
     ) -> list[dict]:
         """Find near-duplicate memories across two scopes."""
-        units_a = await self.store.list_active(self.user_id, scope_a, limit=500)
-        units_b = await self.store.list_active(self.user_id, scope_b, limit=500)
+        units_a = await self.store.list_active(self.user_id, namespace_a, limit=500)
+        units_b = await self.store.list_active(self.user_id, namespace_b, limit=500)
         if not units_a or not units_b:
             return []
 
@@ -1087,8 +1087,8 @@ class MemoryManager:
                 union = len(toks_a | toks_b)
                 if union > 0 and inter / union >= threshold:
                     duplicates.append({
-                        "id_a": id_a, "scope_a": scope_a,
-                        "id_b": id_b, "scope_b": scope_b,
+                        "id_a": id_a, "namespace_a": namespace_a,
+                        "id_b": id_b, "namespace_b": namespace_b,
                         "similarity": round(inter / union, 4),
                         "preview_a": content_a[id_a],
                         "preview_b": content_b[id_b],
@@ -1096,13 +1096,13 @@ class MemoryManager:
         duplicates.sort(key=lambda x: x["similarity"], reverse=True)
         return duplicates[:20]
 
-    async def suggest_type_corrections(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    async def suggest_type_corrections(self, namespace: str | None = None, limit: int = 10) -> list[dict]:
         """Suggest memories that might be mistyped based on content analysis.
 
         Checks for content patterns that suggest a different type than assigned.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=500)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=500)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1138,7 +1138,7 @@ class MemoryManager:
 
         return suggestions[:limit]
 
-    async def compute_urgency_scores(self, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    async def compute_urgency_scores(self, namespace: str | None = None, limit: int = 10) -> list[dict]:
         """Compute urgency scores for memories that need attention.
 
         Urgency considers TTL proximity, low access count, and importance.
@@ -1146,8 +1146,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -1239,15 +1239,15 @@ class MemoryManager:
     async def search_with_context(
         self,
         query: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
         """Search memories and return results with matched terms highlighted.
 
         Returns dicts with memory info and highlighted content snippets.
         """
-        scope = scope_id or self.scope_id
-        hits = await self.store.search_keyword(self.user_id, scope,query, limit=limit)
+        ns = namespace or self.namespace
+        hits = await self.store.search_keyword(self.user_id, ns,query, limit=limit)
         results = []
         for hit in hits:
             # Build a snippet with matched terms marked.
@@ -1268,13 +1268,13 @@ class MemoryManager:
             })
         return results
 
-    async def group_by_topic(self, scope_id: str | None = None, min_group_size: int = 2) -> dict:
+    async def group_by_topic(self, namespace: str | None = None, min_group_size: int = 2) -> dict:
         """Group active memories by their dominant topic.
 
         Returns topic -> list of memory summaries, sorted by group size descending.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         topic_groups: dict[str, list[dict]] = {}
 
         for u in units:
@@ -1307,7 +1307,7 @@ class MemoryManager:
 
     async def find_stale_memories(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         stale_days: int = 30,
         limit: int = 20,
     ) -> list[dict]:
@@ -1317,8 +1317,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         stale: list[dict] = []
 
@@ -1350,20 +1350,20 @@ class MemoryManager:
         stale.sort(key=lambda x: x["staleness_factor"], reverse=True)
         return stale[:limit]
 
-    async def get_memory_summary_report(self, scope_id: str | None = None) -> dict:
-        """Generate a comprehensive summary report of a scope's memory state.
+    async def get_memory_summary_report(self, namespace: str | None = None) -> dict:
+        """Generate a comprehensive summary report of a namespace's memory state.
 
         Combines stats, health, age distribution, importance histogram, and top topics
         into a single report suitable for dashboards or periodic reviews.
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        stats = await self.get_scope_stats(scope)
-        health = await self.get_health_score(scope)
-        age_dist = await self.get_age_distribution(scope)
-        importance_hist = await self.get_importance_histogram(scope)
-        topics = await self.group_by_topic(scope, min_group_size=1)
+        ns = namespace or self.namespace
+        stats = await self.get_namespace_stats(ns)
+        health = await self.get_health_score(ns)
+        age_dist = await self.get_age_distribution(ns)
+        importance_hist = await self.get_importance_histogram(ns)
+        topics = await self.group_by_topic(ns, min_group_size=1)
 
         # Top 5 topics by group size.
         top_topics = []
@@ -1371,7 +1371,7 @@ class MemoryManager:
             top_topics.append({"topic": topic, "count": len(members)})
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "total_active": stats.get("active", 0),
             "total_superseded": stats.get("superseded", 0),
@@ -1382,14 +1382,14 @@ class MemoryManager:
             "topic_group_count": topics.get("total_groups", 0),
         }
 
-    async def suggest_auto_tags(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def suggest_auto_tags(self, namespace: str | None = None, limit: int = 20) -> list[dict]:
         """Suggest tags for memories based on content analysis.
 
         Analyzes content for topic keywords, entities, and patterns to suggest
         tags for memories that have no tags.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1424,13 +1424,13 @@ class MemoryManager:
 
         return suggestions[:limit]
 
-    async def get_deduplication_report(self, scope_id: str | None = None, threshold: float = 0.75) -> dict:
-        """Generate a comprehensive deduplication report for a scope.
+    async def get_deduplication_report(self, namespace: str | None = None, threshold: float = 0.75) -> dict:
+        """Generate a comprehensive deduplication report for a ns.
 
         Finds all near-duplicate pairs and groups them by cluster.
         """
-        scope = scope_id or self.scope_id
-        dupes = await self.find_duplicates(scope, threshold=threshold)
+        ns = namespace or self.namespace
+        dupes = await self.find_duplicates(ns, threshold=threshold)
 
         # Group duplicates into clusters using union-find.
         parent: dict[str, str] = {}
@@ -1476,15 +1476,15 @@ class MemoryManager:
     async def search_regex(
         self,
         pattern: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
         """Search memory content using a regular expression pattern.
 
         Returns matching memories with the matched portion highlighted.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         results = []
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
@@ -1507,18 +1507,18 @@ class MemoryManager:
 
         return results
 
-    async def merge_scopes(self, source_scope: str, target_scope: str) -> dict:
-        """Merge all active memories from source scope into target scope.
+    async def merge_scopes(self, source_namespace: str, target_namespace: str) -> dict:
+        """Merge all active memories from source namespace into target ns.
 
-        Unlike migrate_scope, this preserves the source scope intact.
-        Memories are copied (shared) to the target scope.
+        Unlike migrate_scope, this preserves the source namespace intact.
+        Memories are copied (shared) to the target ns.
         """
-        source_units = await self.store.list_active(self.user_id, source_scope, limit=5000)
+        source_units = await self.store.list_active(self.user_id, source_namespace, limit=5000)
         if not source_units:
-            return {"copied": 0, "skipped": 0, "source_scope": source_scope, "target_scope": target_scope}
+            return {"copied": 0, "skipped": 0, "source_namespace": source_namespace, "target_namespace": target_namespace}
 
         # Check existing target content to avoid duplicates.
-        target_units = await self.store.list_active(self.user_id, target_scope, limit=5000)
+        target_units = await self.store.list_active(self.user_id, target_namespace, limit=5000)
         target_contents = {u.content.strip().lower() for u in target_units}
 
         copied = 0
@@ -1527,9 +1527,9 @@ class MemoryManager:
             if u.content.strip().lower() in target_contents:
                 skipped += 1
                 continue
-            # Use share_to_scope to copy.
+            # Use share_to_namespace to copy.
             try:
-                await self.store.share_to_scope(u.memory_id, target_scope)
+                await self.store.share_to_namespace(u.memory_id, target_namespace)
                 copied += 1
             except Exception:
                 skipped += 1
@@ -1537,8 +1537,8 @@ class MemoryManager:
         return {
             "copied": copied,
             "skipped": skipped,
-            "source_scope": source_scope,
-            "target_scope": target_scope,
+            "source_namespace": source_namespace,
+            "target_namespace": target_namespace,
         }
 
     async def diff_memories(self, memory_id_a: str, memory_id_b: str) -> dict:
@@ -1588,25 +1588,25 @@ class MemoryManager:
             "importance_delta": round(unit_a.importance - unit_b.importance, 4),
         }
 
-    async def clone_scope(
-        self, user_id: str, *, source_scope: str, target_scope: str
+    async def clone_namespace(
+        self, user_id: str, *, source_namespace: str, target_namespace: str
     ) -> dict:
-        """Deep-clone a scope: copies all active memories with full metadata.
+        """deep-clone a namespace: copies all active memories with full metadata.
 
         Unlike merge_scopes, this creates fresh copies with new IDs.
         """
         import uuid
 
-        source_units = await self.store.list_active(user_id, source_scope, limit=5000)
+        source_units = await self.store.list_active(user_id, source_namespace, limit=5000)
         if not source_units:
-            return {"cloned": 0, "source_scope": source_scope, "target_scope": target_scope}
+            return {"cloned": 0, "source_namespace": source_namespace, "target_namespace": target_namespace}
 
         cloned = 0
         for u in source_units:
             new_unit = MemoryUnit(
                 memory_id=str(uuid.uuid4()),
                 user_id=u.user_id,
-                scope_id=target_scope,
+                namespace=target_namespace,
                 memory_type=u.memory_type,
                 content=u.content,
                 source_session_id=u.source_session_id,
@@ -1621,17 +1621,17 @@ class MemoryManager:
 
         return {
             "cloned": cloned,
-            "source_scope": source_scope,
-            "target_scope": target_scope,
+            "source_namespace": source_namespace,
+            "target_namespace": target_namespace,
         }
 
-    async def analyze_access_frequency(self, scope_id: str | None = None) -> dict:
+    async def analyze_access_frequency(self, namespace: str | None = None) -> dict:
         """Categorize memories into hot (frequently accessed), warm, and cold buckets.
 
         Based on access_count relative to pool average.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if not units:
             return {"hot": [], "warm": [], "cold": [], "total": 0, "avg_access": 0}
 
@@ -1670,14 +1670,14 @@ class MemoryManager:
             "cold_count": len(cold),
         }
 
-    async def suggest_enrichments(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def suggest_enrichments(self, namespace: str | None = None, limit: int = 20) -> list[dict]:
         """Suggest enrichments for memories that lack metadata.
 
         Identifies memories missing summaries, tags, or topics that would benefit
         from enrichment.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         suggestions: list[dict] = []
 
         for u in units:
@@ -1703,10 +1703,10 @@ class MemoryManager:
         suggestions.sort(key=lambda x: (-x["importance"], x["completeness"]))
         return suggestions[:limit]
 
-    async def get_content_density_stats(self, scope_id: str | None = None) -> dict:
+    async def get_content_density_stats(self, namespace: str | None = None) -> dict:
         """Analyze content density: token counts, value per token, and size distribution."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if not units:
             return {"total": 0, "avg_tokens": 0, "avg_value_per_token": 0, "size_buckets": {}}
 
@@ -1742,20 +1742,20 @@ class MemoryManager:
 
     async def check_scope_quota(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         max_memories: int = 1000,
     ) -> dict:
-        """Check if a scope is within its memory quota.
+        """Check if a namespace is within its memory quota.
 
         Returns quota status including current count, limit, and utilization.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=max_memories + 1)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=max_memories + 1)
         count = len(units)
         utilization = count / max(max_memories, 1)
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "current_count": count,
             "max_memories": max_memories,
             "utilization": round(utilization, 4),
@@ -1764,12 +1764,12 @@ class MemoryManager:
             "warning": utilization >= 0.9,
         }
 
-    async def forecast_expiry(self, scope_id: str | None = None) -> dict:
+    async def forecast_expiry(self, namespace: str | None = None) -> dict:
         """Forecast memory expirations over upcoming time windows."""
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
 
         windows = {
@@ -1805,13 +1805,13 @@ class MemoryManager:
             "forecast": windows,
         }
 
-    async def get_type_overlap_matrix(self, scope_id: str | None = None) -> dict:
+    async def get_type_overlap_matrix(self, namespace: str | None = None) -> dict:
         """Compute topic overlap between memory types.
 
         Returns a matrix showing how much each pair of types shares topics.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
 
         type_topics: dict[str, set[str]] = {}
         for u in units:
@@ -1839,7 +1839,7 @@ class MemoryManager:
 
     async def recommend_archival(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
         """Recommend memories for archival based on multiple signals.
@@ -1847,8 +1847,8 @@ class MemoryManager:
         Combines staleness, low importance, low access, low quality, and no links
         into a single archival recommendation score.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         recommendations: list[dict] = []
 
         from datetime import datetime, timezone
@@ -1902,24 +1902,24 @@ class MemoryManager:
         recommendations.sort(key=lambda x: x["archival_score"], reverse=True)
         return recommendations[:limit]
 
-    async def get_scope_dashboard(self, scope_id: str | None = None) -> dict:
-        """Generate a comprehensive operational dashboard for a scope.
+    async def get_scope_dashboard(self, namespace: str | None = None) -> dict:
+        """Generate a comprehensive operational dashboard for a ns.
 
         Combines: summary report, access frequency, content density, link stats,
         expiry forecast, quota, and archival recommendations into one view.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
 
-        report = await self.get_memory_summary_report(scope)
-        access = await self.analyze_access_frequency(scope)
-        density = await self.get_content_density_stats(scope)
-        forecast = await self.forecast_expiry(scope)
-        quota = await self.check_scope_quota(scope)
-        archive_recs = await self.recommend_archival(scope, limit=5)
-        urgency = await self.compute_urgency_scores(scope, limit=5)
+        report = await self.get_memory_summary_report(ns)
+        access = await self.analyze_access_frequency(ns)
+        density = await self.get_content_density_stats(ns)
+        forecast = await self.forecast_expiry(ns)
+        quota = await self.check_scope_quota(ns)
+        archive_recs = await self.recommend_archival(ns, limit=5)
+        urgency = await self.compute_urgency_scores(ns, limit=5)
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "overview": {
                 "total_active": report.get("total_active", 0),
                 "health_score": report.get("health_score", 0),
@@ -1946,14 +1946,14 @@ class MemoryManager:
             "urgent_items": len(urgency),
         }
 
-    async def generate_detailed_scope_comparison(self, scope_a: str, scope_b: str) -> dict:
+    async def generate_detailed_scope_comparison(self, namespace_a: str, namespace_b: str) -> dict:
         """Generate a detailed comparison report between two scopes.
 
-        Goes beyond compare_scopes to include type distributions, topic overlap,
+        Goes beyond compare_namespaces to include type distributions, topic overlap,
         and health differences.
         """
-        units_a = await self.store.list_active(self.user_id, scope_a, limit=5000)
-        units_b = await self.store.list_active(self.user_id, scope_b, limit=5000)
+        units_a = await self.store.list_active(self.user_id, namespace_a, limit=5000)
+        units_b = await self.store.list_active(self.user_id, namespace_b, limit=5000)
 
         # Type distributions.
         types_a: dict[str, int] = {}
@@ -1982,15 +1982,15 @@ class MemoryManager:
         imp_b = [u.importance for u in units_b] or [0]
 
         return {
-            "scope_a": {
-                "name": scope_a,
+            "namespace_a": {
+                "name": namespace_a,
                 "count": len(units_a),
                 "types": types_a,
                 "topic_count": len(topics_a),
                 "avg_importance": round(sum(imp_a) / len(imp_a), 4),
             },
-            "scope_b": {
-                "name": scope_b,
+            "namespace_b": {
+                "name": namespace_b,
                 "count": len(units_b),
                 "types": types_b,
                 "topic_count": len(topics_b),
@@ -2052,15 +2052,15 @@ class MemoryManager:
             },
         }
 
-    async def recalculate_importance(self, scope_id: str | None = None) -> dict:
+    async def recalculate_importance(self, namespace: str | None = None) -> dict:
         """Recalculate importance for all memories based on current signals.
 
         Factors: access frequency, link count, metadata completeness, recency.
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         updated = 0
 
@@ -2104,13 +2104,13 @@ class MemoryManager:
         return {
             "total_evaluated": len(units),
             "updated": updated,
-            "scope_id": scope,
+            "namespace": ns,
         }
 
-    async def analyze_type_balance(self, scope_id: str | None = None) -> dict:
+    async def analyze_type_balance(self, namespace: str | None = None) -> dict:
         """Analyze memory type distribution and suggest rebalancing actions."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if not units:
             return {"total": 0, "distribution": {}, "suggestions": []}
 
@@ -2149,29 +2149,29 @@ class MemoryManager:
             "suggestions": suggestions,
         }
 
-    async def compare_scope_health(self, scope_a: str, scope_b: str) -> dict:
+    async def compare_scope_health(self, namespace_a: str, namespace_b: str) -> dict:
         """Compare health scores and key metrics between two scopes."""
-        health_a = await self.get_health_score(scope_a)
-        health_b = await self.get_health_score(scope_b)
-        stats_a = await self.get_scope_stats(scope_a)
-        stats_b = await self.get_scope_stats(scope_b)
+        health_a = await self.get_health_score(namespace_a)
+        health_b = await self.get_health_score(namespace_b)
+        stats_a = await self.get_namespace_stats(namespace_a)
+        stats_b = await self.get_namespace_stats(namespace_b)
 
         score_a = health_a.get("score", 0) if isinstance(health_a, dict) else 0
         score_b = health_b.get("score", 0) if isinstance(health_b, dict) else 0
 
         return {
-            "scope_a": {
-                "name": scope_a,
+            "namespace_a": {
+                "name": namespace_a,
                 "health": score_a,
                 "active": stats_a.get("active", 0),
             },
-            "scope_b": {
-                "name": scope_b,
+            "namespace_b": {
+                "name": namespace_b,
                 "health": score_b,
                 "active": stats_b.get("active", 0),
             },
             "health_delta": score_a - score_b,
-            "healthier_scope": scope_a if score_a >= score_b else scope_b,
+            "healthier_scope": namespace_a if score_a >= score_b else namespace_b,
         }
 
     async def get_memory_lifecycle(self, memory_id: str) -> dict:
@@ -2195,16 +2195,16 @@ class MemoryManager:
             },
         }
 
-    async def get_maintenance_recommendations(self, scope_id: str | None = None) -> dict:
-        """Generate maintenance recommendations based on scope state.
+    async def get_maintenance_recommendations(self, namespace: str | None = None) -> dict:
+        """Generate maintenance recommendations based on namespace state.
 
-        Analyzes the scope and recommends specific maintenance actions.
+        Analyzes the namespace and recommends specific maintenance actions.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         actions = []
 
         # Check for expired memories.
-        forecast = await self.forecast_expiry(scope)
+        forecast = await self.forecast_expiry(ns)
         if forecast["forecast"].get("next_24h", 0) > 0:
             actions.append({
                 "action": "expire_stale",
@@ -2213,7 +2213,7 @@ class MemoryManager:
             })
 
         # Check quota.
-        quota = await self.check_scope_quota(scope)
+        quota = await self.check_scope_quota(ns)
         if quota["warning"]:
             actions.append({
                 "action": "archive_low_value",
@@ -2222,7 +2222,7 @@ class MemoryManager:
             })
 
         # Check for stale memories.
-        stale = await self.find_stale_memories(scope, stale_days=60, limit=1)
+        stale = await self.find_stale_memories(ns, stale_days=60, limit=1)
         if stale:
             actions.append({
                 "action": "review_stale",
@@ -2231,7 +2231,7 @@ class MemoryManager:
             })
 
         # Check type balance.
-        balance = await self.analyze_type_balance(scope)
+        balance = await self.analyze_type_balance(ns)
         if balance.get("suggestions"):
             actions.append({
                 "action": "rebalance_types",
@@ -2240,7 +2240,7 @@ class MemoryManager:
             })
 
         # Check for untagged memories.
-        tag_suggestions = self.suggest_auto_tags(scope, limit=1)
+        tag_suggestions = self.suggest_auto_tags(ns, limit=1)
         if tag_suggestions:
             actions.append({
                 "action": "tag_memories",
@@ -2251,18 +2251,18 @@ class MemoryManager:
         actions.sort(key=lambda a: {"high": 0, "medium": 1, "low": 2}.get(a["priority"], 3))
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "total_recommendations": len(actions),
             "recommendations": actions,
         }
 
-    async def export_for_training(self, scope_id: str | None = None) -> list[dict]:
+    async def export_for_training(self, namespace: str | None = None) -> list[dict]:
         """Export memories in a format suitable for ML training/fine-tuning.
 
         Returns structured records with content, metadata, and quality signals.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         records = []
 
         for u in units:
@@ -2277,7 +2277,7 @@ class MemoryManager:
                 "tags": u.tags,
                 "metadata": {
                     "memory_id": u.memory_id,
-                    "scope_id": u.scope_id,
+                    "namespace": u.namespace,
                     "created_at": u.created_at,
                 },
             }
@@ -2307,7 +2307,7 @@ class MemoryManager:
 
         return {"updated": updated, "failed": failed, "total": len(updates)}
 
-    async def compute_freshness_scores(self, scope_id: str | None = None, limit: int = 20) -> list[dict]:
+    async def compute_freshness_scores(self, namespace: str | None = None, limit: int = 20) -> list[dict]:
         """Compute combined freshness scores for memories.
 
         Considers: recency of creation, last access, update frequency, and TTL.
@@ -2315,8 +2315,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         now = datetime.now(timezone.utc)
         scored: list[dict] = []
 
@@ -2359,19 +2359,19 @@ class MemoryManager:
 
     async def get_scope_inventory(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         type_filter: str | None = None,
         min_importance: float = 0.0,
         max_importance: float = 1.0,
         sort_by: str = "importance",
         limit: int = 50,
     ) -> dict:
-        """Get a detailed, filterable inventory of memories in a scope.
+        """Get a detailed, filterable inventory of memories in a ns.
 
         Supports filtering by type, importance range, and sorting.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
 
         # Apply filters.
         filtered = units
@@ -2434,10 +2434,10 @@ class MemoryManager:
             "normalized_length": len(normalized),
         }
 
-    async def batch_normalize_content(self, scope_id: str | None = None) -> dict:
-        """Normalize content for all memories in a scope."""
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+    async def batch_normalize_content(self, namespace: str | None = None) -> dict:
+        """Normalize content for all memories in a ns."""
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         normalized = 0
 
         for u in units:
@@ -2450,17 +2450,17 @@ class MemoryManager:
 
     async def get_priority_queue(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
         """Get a priority-ranked queue of memories needing attention.
 
         Combines urgency, quality, and staleness into a single priority score.
         """
-        scope = scope_id or self.scope_id
-        urgency = await self.compute_urgency_scores(scope, limit=50)
-        enrichment = await self.suggest_enrichments(scope, limit=50)
-        stale = await self.find_stale_memories(scope, stale_days=30, limit=50)
+        ns = namespace or self.namespace
+        urgency = await self.compute_urgency_scores(ns, limit=50)
+        enrichment = await self.suggest_enrichments(ns, limit=50)
+        stale = await self.find_stale_memories(ns, stale_days=30, limit=50)
 
         # Build combined priority map.
         priority_map: dict[str, dict] = {}
@@ -2536,13 +2536,13 @@ class MemoryManager:
             "content_preview": content[:80],
         }
 
-    async def get_importance_histogram(self, scope_id: str | None = None, buckets: int = 10) -> dict:
+    async def get_importance_histogram(self, namespace: str | None = None, buckets: int = 10) -> dict:
         """Get importance distribution as a histogram for operators.
 
         Returns bucket counts for [0.0-0.1), [0.1-0.2), ..., [0.9-1.0].
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         histogram: dict[str, int] = {}
         bucket_size = 1.0 / buckets
         for i in range(buckets):
@@ -2558,28 +2558,28 @@ class MemoryManager:
             histogram[label] = histogram.get(label, 0) + 1
         return {"histogram": histogram, "total": len(units)}
 
-    async def run_maintenance(self, scope_id: str | None = None) -> dict:
+    async def run_maintenance(self, namespace: str | None = None) -> dict:
         """Run a full maintenance cycle: expire, consolidate, clean orphans, compact.
 
         Returns a summary of all actions taken.
         """
-        scope = scope_id or self.scope_id
-        results: dict = {"scope_id": scope}
+        ns = namespace or self.namespace
+        results: dict = {"namespace": ns}
 
         # 1. Expire TTL-stale memories.
-        expired = await self.expire_stale(scope)
+        expired = await self.expire_stale(ns)
         results["expired"] = expired
 
         # 2. Consolidate (dedup, near-dedup, decay).
-        consolidation = await self.consolidator.consolidate(scope)
+        consolidation = await self.consolidator.consolidate(ns)
         results["consolidation"] = consolidation
 
         # 3. Apply typed retention policy.
-        retention = await self.apply_typed_retention(scope)
+        retention = await self.apply_typed_retention(ns)
         results["retention_archived"] = retention["archived"]
 
         # 4. Garbage collect superseded memories.
-        gc = await self.store.garbage_collect(scope)
+        gc = await self.store.garbage_collect(ns)
         results["gc_removed"] = gc.get("removed", 0)
 
         # 6. Compact the database.
@@ -2589,20 +2589,20 @@ class MemoryManager:
         self._notify("maintenance", **results)
         return results
 
-    async def sample_memories(self, scope_id: str | None = None, count: int = 5) -> list[MemoryUnit]:
+    async def sample_memories(self, namespace: str | None = None, count: int = 5) -> list[MemoryUnit]:
         """Return a random sample of active memories for exploration."""
-        scope = scope_id or self.scope_id
-        return await self.store.sample_memories(self.user_id, scope, count)
+        ns = namespace or self.namespace
+        return await self.store.sample_memories(self.user_id, ns, count)
 
-    async def get_api_status(self, scope_id: str | None = None) -> dict:
+    async def get_api_status(self, namespace: str | None = None) -> dict:
         """Get a comprehensive, API-ready status summary.
 
         Returns a JSON-serializable dict combining store stats, health,
         policy state, and feature usage indicators.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-        health = await self.store.compute_health_score(self.user_id, scope)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
+        health = await self.store.compute_health_score(self.user_id, ns)
         db_info = await self.store.get_db_size()
 
         type_counts: dict[str, int] = {}
@@ -2621,7 +2621,7 @@ class MemoryManager:
             total_access += u.access_count
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "schema_version": "postgres",
             "active_count": len(units),
             "type_distribution": type_counts,
@@ -2641,12 +2641,12 @@ class MemoryManager:
             "embedder": self.get_embedder_info(),
         }
 
-    async def get_optimization_hints(self, scope_id: str | None = None) -> list[str]:
+    async def get_optimization_hints(self, namespace: str | None = None) -> list[str]:
         """Generate optimization suggestions based on current store state."""
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         hints: list[str] = []
 
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if not units:
             return ["Store is empty — no optimizations needed."]
 
@@ -2665,7 +2665,7 @@ class MemoryManager:
             hints.append("No memories have TTL set: consider running auto-ttl to prevent unbounded growth.")
 
         # Check for duplicates.
-        dupes = await self.store.find_duplicates(self.user_id, scope, threshold=0.85)
+        dupes = await self.store.find_duplicates(self.user_id, ns, threshold=0.85)
         if dupes:
             hints.append(f"{len(dupes)} near-duplicate pair(s) found: consider consolidation.")
 
@@ -2674,15 +2674,15 @@ class MemoryManager:
 
         return hints
 
-    async def generate_usage_report(self, scope_id: str | None = None) -> dict:
+    async def generate_usage_report(self, namespace: str | None = None) -> dict:
         """Generate a comprehensive usage report for monitoring and dashboards.
 
         Combines health score, quality distribution, type breakdown,
         access patterns, link statistics, and TTL status.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-        health = await self.store.compute_health_score(self.user_id, scope)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
+        health = await self.store.compute_health_score(self.user_id, ns)
 
         type_counts: dict[str, int] = {}
         total_access = 0
@@ -2704,7 +2704,7 @@ class MemoryManager:
 
         n = max(len(units), 1)
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "total_active": len(units),
             "health_score": health.get("score", 0),
             "type_distribution": type_counts,
@@ -2740,22 +2740,22 @@ class MemoryManager:
 
     async def re_embed_scope(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         embedder: "BaseEmbedder | None" = None,
     ) -> dict:
-        """Re-encode all active memories in a scope with the current (or given) embedder.
+        """Re-encode all active memories in a namespace with the current (or given) embedder.
 
         Useful when switching from hashing to semantic embeddings.
         Returns count of memories re-embedded.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         emb = embedder or self.embedder
         if emb is None:
             return {"error": "No embedder available", "re_embedded": 0}
 
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         if not units:
-            return {"scope_id": scope, "re_embedded": 0, "total": 0}
+            return {"namespace": ns, "re_embedded": 0, "total": 0}
 
         # Batch encode for efficiency.
         texts = [u.content for u in units]
@@ -2769,7 +2769,7 @@ class MemoryManager:
             if vec:
                 await self.store.update_embedding(unit.memory_id, vec)
                 re_embedded += 1
-        return {"scope_id": scope, "re_embedded": re_embedded, "total": len(units)}
+        return {"namespace": ns, "re_embedded": re_embedded, "total": len(units)}
 
     async def compress_content(self, memory_id: str) -> dict:
         """Compress memory content by removing redundancy and verbosity.
@@ -2796,13 +2796,13 @@ class MemoryManager:
             "reduction_pct": round(100 * (1 - len(compressed) / max(len(original), 1)), 1),
         }
 
-    async def batch_compress(self, scope_id: str | None = None) -> dict:
-        """Compress content for all memories in a scope.
+    async def batch_compress(self, namespace: str | None = None) -> dict:
+        """Compress content for all memories in a ns.
 
         Returns stats on how many were compressed and total token savings.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         compressed = 0
         total_saved = 0
 
@@ -2818,7 +2818,7 @@ class MemoryManager:
 
     async def bulk_tag_by_type(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         type_tag_map: dict[str, list[str]] | None = None,
     ) -> dict:
         """Auto-tag all memories based on their type.
@@ -2826,14 +2826,14 @@ class MemoryManager:
         type_tag_map maps memory type values to tags to add.
         Default: {"project_state": ["infra"], "preference": ["user-pref"]}.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         defaults = {
             "project_state": ["infrastructure"],
             "preference": ["user-preference"],
             "procedural_observation": ["procedure"],
         }
         tag_map = type_tag_map or defaults
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         tagged = 0
 
         for u in units:
@@ -2847,7 +2847,7 @@ class MemoryManager:
 
         return {"total": len(units), "tagged": tagged}
 
-    async def analyze_retention_effectiveness(self, scope_id: str | None = None) -> dict:
+    async def analyze_retention_effectiveness(self, namespace: str | None = None) -> dict:
         """Analyze how well retention policies are working.
 
         Measures: archived vs active ratio, access patterns before archival,
@@ -2855,9 +2855,9 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        active = await self.store.list_active(self.user_id, scope, limit=5000)
-        analytics = await self.store.get_scope_analytics(self.user_id, scope)
+        ns = namespace or self.namespace
+        active = await self.store.list_active(self.user_id, ns, limit=5000)
+        analytics = await self.store.get_namespace_analytics(self.user_id, ns)
 
         active_count = analytics.get("active", 0)
         archived_count = analytics.get("archived", 0)
@@ -2882,7 +2882,7 @@ class MemoryManager:
                     pass
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "total_memories": total,
             "active": active_count,
             "archived": archived_count,
@@ -2897,26 +2897,26 @@ class MemoryManager:
             ) else "review_needed",
         }
 
-    async def get_memory_growth_rate(self, scope_id: str | None = None, window_days: int = 30) -> dict:
+    async def get_memory_growth_rate(self, namespace: str | None = None, window_days: int = 30) -> dict:
         """Compute memory growth rate over a time window.
 
         Returns memories added per day and projected growth.
         """
         from datetime import datetime, timedelta, timezone
 
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(days=window_days)).isoformat()
 
-        total_active = len(await self.store.list_active(self.user_id, scope, limit=5000))
-        recent_count = await self.store.count_memories_since(self.user_id, scope, cutoff)
+        total_active = len(await self.store.list_active(self.user_id, ns, limit=5000))
+        recent_count = await self.store.count_memories_since(self.user_id, ns, cutoff)
 
         rate_per_day = round(recent_count / max(window_days, 1), 2)
         projected_30d = round(rate_per_day * 30)
         projected_90d = round(rate_per_day * 90)
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "window_days": window_days,
             "current_active": total_active,
             "added_in_window": recent_count,
@@ -2927,7 +2927,7 @@ class MemoryManager:
 
     async def auto_deduplicate(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         threshold: float = 0.85,
         dry_run: bool = False,
     ) -> dict:
@@ -2936,8 +2936,8 @@ class MemoryManager:
         Uses word-level Jaccard similarity. Keeps the memory with higher
         importance (or more recent if tied). Respects pinned memories.
         """
-        scope = scope_id or self.scope_id
-        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=threshold)
+        ns = namespace or self.namespace
+        duplicates = await self.store.find_duplicates(self.user_id, ns, threshold=threshold)
         archived = 0
         pairs = []
 
@@ -2969,7 +2969,7 @@ class MemoryManager:
                 archived += 1
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "duplicates_found": len(pairs),
             "archived": archived,
             "dry_run": dry_run,
@@ -2978,18 +2978,18 @@ class MemoryManager:
 
     async def forecast_capacity(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         quota: int = 1000,
     ) -> dict:
-        """Project when a scope will reach its quota based on growth rate."""
-        scope = scope_id or self.scope_id
-        growth = await self.get_memory_growth_rate(scope, window_days=30)
+        """Project when a namespace will reach its quota based on growth rate."""
+        ns = namespace or self.namespace
+        growth = await self.get_memory_growth_rate(ns, window_days=30)
         current = growth["current_active"]
         rate = growth["rate_per_day"]
 
         if rate <= 0:
             return {
-                "scope_id": scope,
+                "namespace": ns,
                 "current": current,
                 "quota": quota,
                 "utilization_pct": round(100 * current / max(quota, 1), 1),
@@ -3001,7 +3001,7 @@ class MemoryManager:
         days_until_full = round(remaining / rate, 1) if rate > 0 else None
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "current": current,
             "quota": quota,
             "utilization_pct": round(100 * current / max(quota, 1), 1),
@@ -3011,7 +3011,7 @@ class MemoryManager:
 
     async def export_audit_trail(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         limit: int = 1000,
     ) -> list[dict]:
         """Export the memory event log as a compliance-ready audit trail.
@@ -3022,52 +3022,52 @@ class MemoryManager:
 
     async def generate_action_plan(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
     ) -> dict:
-        """Generate a comprehensive operator action plan for a scope.
+        """Generate a comprehensive operator action plan for a ns.
 
         Combines deduplication, compression, enrichment, archival, and tagging
         recommendations into a single prioritized action list.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
 
         actions = []
 
         # 1. Duplicates to merge.
-        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=0.85)
+        duplicates = await self.store.find_duplicates(self.user_id, ns, threshold=0.85)
         if duplicates:
             actions.append({
                 "action": "deduplicate",
                 "priority": "high",
                 "count": len(duplicates),
                 "description": f"Found {len(duplicates)} duplicate pairs above 85% similarity",
-                "command": "memory auto-dedup --scope " + scope,
+                "command": "memory auto-dedup --namespace " + ns,
             })
 
         # 2. Stale memories.
-        stale = await self.find_stale_memories(scope, stale_days=60, limit=50)
+        stale = await self.find_stale_memories(ns, stale_days=60, limit=50)
         if stale:
             actions.append({
                 "action": "review_stale",
                 "priority": "medium",
                 "count": len(stale),
                 "description": f"{len(stale)} memories not accessed in 60+ days",
-                "command": "memory stale --scope " + scope,
+                "command": "memory stale --namespace " + ns,
             })
 
         # 3. Enrichment needed.
-        enrichments = await self.suggest_enrichments(scope, limit=20)
+        enrichments = await self.suggest_enrichments(ns, limit=20)
         if enrichments:
             actions.append({
                 "action": "enrich",
                 "priority": "low",
                 "count": len(enrichments),
                 "description": f"{len(enrichments)} memories lack topics, entities, or tags",
-                "command": "memory enrichments --scope " + scope,
+                "command": "memory enrichments --namespace " + ns,
             })
 
         # 4. Compression opportunities.
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         compressible = sum(1 for u in units if len(u.content) > 200)
         if compressible > 0:
             actions.append({
@@ -3075,11 +3075,11 @@ class MemoryManager:
                 "priority": "low",
                 "count": compressible,
                 "description": f"{compressible} memories have verbose content (>200 chars)",
-                "command": "memory compress --scope " + scope,
+                "command": "memory compress --namespace " + ns,
             })
 
         # 5. Type balance.
-        balance = await self.analyze_type_balance(scope)
+        balance = await self.analyze_type_balance(ns)
         if balance.get("suggestions"):
             actions.append({
                 "action": "rebalance_types",
@@ -3089,7 +3089,7 @@ class MemoryManager:
                     str(s) if isinstance(s, str) else s.get("suggestion", str(s))
                     for s in balance["suggestions"][:3]
                 ),
-                "command": "memory type-balance --scope " + scope,
+                "command": "memory type-balance --namespace " + ns,
             })
 
         # Sort by priority.
@@ -3097,7 +3097,7 @@ class MemoryManager:
         actions.sort(key=lambda a: priority_order.get(a["priority"], 3))
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "total_actions": len(actions),
             "actions": actions,
         }
@@ -3105,7 +3105,7 @@ class MemoryManager:
     async def search_grouped(
         self,
         query_text: str,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         group_by: str = "type",
         limit: int = 20,
     ) -> dict:
@@ -3113,10 +3113,10 @@ class MemoryManager:
 
         Returns grouped results with per-group scores.
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         query = MemoryQuery(
             user_id=self.user_id,
-            scope_id=scope,
+            namespace=ns,
             query_text=query_text,
             top_k=limit,
         )
@@ -3166,12 +3166,12 @@ class MemoryManager:
 
     async def get_bookmarks(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         bookmark_tag: str = "bookmarked",
     ) -> list[dict]:
-        """Get all bookmarked memories in a scope."""
-        scope = scope_id or self.scope_id
-        units = await self.store.search_by_tag(self.user_id, scope, bookmark_tag)
+        """Get all bookmarked memories in a ns."""
+        ns = namespace or self.namespace
+        units = await self.store.search_by_tag(self.user_id, ns, bookmark_tag)
         return [
             {
                 "memory_id": u.memory_id,
@@ -3183,18 +3183,18 @@ class MemoryManager:
             for u in units
         ]
 
-    async def archive_scope(self, user_id: str, scope_id: str | None = None) -> dict:
-        """Archive all active memories in a scope.
+    async def archive_namespace(self, user_id: str, namespace: str | None = None) -> dict:
+        """Archive all active memories in a ns.
 
-        Useful for retiring old scopes or preparing for scope cleanup.
+        Useful for retiring old namespaces or preparing for namespace cleanup.
         Does not touch pinned memories (importance >= 0.99).
         """
-        units = await self.store.list_active(user_id, scope_id, limit=5000)
+        units = await self.store.list_active(user_id, namespace, limit=5000)
         to_archive = [u.memory_id for u in units if u.importance < 0.99]
         archived = await self.store.bulk_archive(to_archive) if to_archive else 0
         pinned_count = len(units) - len(to_archive)
         return {
-            "scope_id": scope_id,
+            "namespace": namespace,
             "archived": archived,
             "pinned_kept": pinned_count,
             "total_before": len(units),
@@ -3202,7 +3202,7 @@ class MemoryManager:
 
     async def bulk_pin_by_criteria(
         self,
-        scope_id: str | None = None,
+        namespace: str | None = None,
         min_importance: float = 0.9,
         min_access_count: int = 10,
     ) -> dict:
@@ -3212,8 +3212,8 @@ class MemoryManager:
         """
         from datetime import datetime, timezone
 
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
         pinned = 0
         now = datetime.now(timezone.utc).isoformat()
 
@@ -3224,16 +3224,16 @@ class MemoryManager:
                 await self.store.update_importance(u.memory_id, 0.99, now)
                 pinned += 1
 
-        return {"scope_id": scope, "pinned": pinned, "total": len(units)}
+        return {"namespace": ns, "pinned": pinned, "total": len(units)}
 
-    async def export_scope_yaml(self, scope_id: str | None = None) -> str:
-        """Export scope memories as YAML format.
+    async def export_scope_yaml(self, namespace: str | None = None) -> str:
+        """Export namespace memories as YAML format.
 
         Returns a YAML string. Does not require external YAML library.
         """
-        scope = scope_id or self.scope_id
-        units = await self.store.list_active(self.user_id, scope, limit=5000)
-        lines = ["# Memory Export", f"# Scope: {scope}", f"# Count: {len(units)}", "memories:"]
+        ns = namespace or self.namespace
+        units = await self.store.list_active(self.user_id, ns, limit=5000)
+        lines = ["# Memory Export", f"# Namespace: {ns}", f"# Count: {len(units)}", "memories:"]
 
         for u in units:
             lines.append(f"  - memory_id: {u.memory_id}")
@@ -3252,7 +3252,7 @@ class MemoryManager:
 
         return "\n".join(lines)
 
-    async def run_system_health_check(self, scope_id: str | None = None) -> dict:
+    async def run_system_health_check(self, namespace: str | None = None) -> dict:
         """Run a comprehensive system health check.
 
         Returns a pass/fail result with categorized findings:
@@ -3262,12 +3262,12 @@ class MemoryManager:
         - freshness: how up-to-date memories are
         - maintenance: pending maintenance actions
         """
-        scope = scope_id or self.scope_id
+        ns = namespace or self.namespace
         issues = []
         checks = {}
 
         # 1. Health score.
-        health = await self.store.compute_health_score(self.user_id, scope)
+        health = await self.store.compute_health_score(self.user_id, ns)
         health_score = health.get("score", 0)
         checks["health_score"] = {
             "passed": health_score >= 50,
@@ -3277,7 +3277,7 @@ class MemoryManager:
             issues.append(f"Low health score: {health_score}")
 
         # 3. Stale count.
-        stale = await self.find_stale_memories(scope, stale_days=90, limit=100)
+        stale = await self.find_stale_memories(ns, stale_days=90, limit=100)
         checks["staleness"] = {
             "passed": len(stale) < 10,
             "stale_count": len(stale),
@@ -3286,7 +3286,7 @@ class MemoryManager:
             issues.append(f"{len(stale)} memories stale for 90+ days")
 
         # 4. Duplicate count.
-        duplicates = await self.store.find_duplicates(self.user_id, scope, threshold=0.90)
+        duplicates = await self.store.find_duplicates(self.user_id, ns, threshold=0.90)
         checks["duplicates"] = {
             "passed": len(duplicates) < 5,
             "duplicate_pairs": len(duplicates),
@@ -3307,7 +3307,7 @@ class MemoryManager:
         overall_passed = all(c.get("passed", False) for c in checks.values())
 
         return {
-            "scope_id": scope,
+            "namespace": ns,
             "passed": overall_passed,
             "checks": checks,
             "issues": issues,
@@ -3320,15 +3320,15 @@ class MemoryManager:
         Combines all scopes, health, embedder, policy, and schema info
         into a single operator-friendly overview.
         """
-        scopes = await self.store.list_scopes(self.user_id)
+        scopes = await self.store.list_namespaces(self.user_id)
         scope_summaries = []
         total_active = 0
         for scope_info in scopes:
-            sid = scope_info.get("scope_id", "")
+            sid = scope_info.get("namespace", "")
             active = scope_info.get("active", 0)
             total_active += active
             scope_summaries.append({
-                "scope_id": sid,
+                "namespace": sid,
                 "active": active,
                 "total": scope_info.get("total", 0),
             })
@@ -3347,14 +3347,14 @@ class MemoryManager:
             "db": await self.store.get_db_size(),
         }
 
-    async def generate_operator_report(self, scope_id: str | None = None) -> dict:
+    async def generate_operator_report(self, namespace: str | None = None) -> dict:
         """Generate a comprehensive operator diagnostic report.
 
         Combines health check, action plan, growth rate, capacity forecast,
         and system summary into a single actionable output for quick triage.
         """
-        scope = scope_id or self.scope_id
-        report: dict = {"scope_id": scope, "generated_at": ""}
+        ns = namespace or self.namespace
+        report: dict = {"namespace": ns, "generated_at": ""}
         try:
             from datetime import datetime, timezone
             report["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -3363,37 +3363,37 @@ class MemoryManager:
 
         # Health check
         try:
-            report["health"] = await self.run_system_health_check(scope_id=scope)
+            report["health"] = await self.run_system_health_check(namespace=namespace)
         except Exception as exc:
             report["health"] = {"error": str(exc)}
 
         # Action plan
         try:
-            report["action_plan"] = self.generate_action_plan(scope_id=scope)
+            report["action_plan"] = self.generate_action_plan(namespace=namespace)
         except Exception as exc:
             report["action_plan"] = {"error": str(exc)}
 
         # Growth rate
         try:
-            report["growth_rate"] = await self.get_memory_growth_rate(scope_id=scope)
+            report["growth_rate"] = await self.get_memory_growth_rate(namespace=namespace)
         except Exception as exc:
             report["growth_rate"] = {"error": str(exc)}
 
         # Capacity forecast
         try:
-            report["capacity"] = self.forecast_capacity(scope_id=scope)
+            report["capacity"] = self.forecast_capacity(namespace=namespace)
         except Exception as exc:
             report["capacity"] = {"error": str(exc)}
 
         # Stats
         try:
-            report["stats"] = await self.get_scope_stats(scope_id=scope)
+            report["stats"] = await self.get_namespace_stats(namespace=namespace)
         except Exception as exc:
             report["stats"] = {"error": str(exc)}
 
         # Type balance
         try:
-            report["type_balance"] = await self.analyze_type_balance(scope_id=scope)
+            report["type_balance"] = await self.analyze_type_balance(namespace=namespace)
         except Exception as exc:
             report["type_balance"] = {"error": str(exc)}
 
@@ -3473,7 +3473,7 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
 
 async def _extract_memory_units_for_turn(
     user_id: str,
-    scope_id: str,
+    namespace: str,
     session_id: str | None,
     turn_index: int,
     prompt_text: str,
@@ -3489,7 +3489,7 @@ async def _extract_memory_units_for_turn(
             MemoryUnit(
                 memory_id=str(uuid.uuid4()),
                 user_id=user_id,
-                scope_id=scope_id,
+                namespace=namespace,
                 memory_type=fact["memory_type"],
                 content=fact["content"][:2000],
                 source_session_id=session_id,
@@ -3513,7 +3513,7 @@ async def _extract_memory_units_for_turn(
         MemoryUnit(
             memory_id=str(uuid.uuid4()),
             user_id=user_id,
-            scope_id=scope_id,
+            namespace=namespace,
             memory_type=fallback_type,
             content=combined[:4000],
             source_session_id=session_id,
@@ -3796,7 +3796,7 @@ async def _detect_conflicts(
     new_units: list[MemoryUnit],
     store: MemoryStore,
     user_id: str,
-    scope_id: str | None,
+    namespace: str | None,
     similarity_threshold: float = 0.65,
 ) -> list[dict]:
     """Detect potential conflicts between new and existing memories.
@@ -3805,7 +3805,7 @@ async def _detect_conflicts(
     with existing memories but have different content, which may indicate
     contradictory information.
     """
-    existing = await store.list_active(user_id, scope_id, limit=500)
+    existing = await store.list_active(user_id, namespace, limit=500)
     if not existing:
         return []
 
@@ -3830,10 +3830,10 @@ async def _dedup_against_store(
     units: list[MemoryUnit],
     store: MemoryStore,
     user_id: str,
-    scope_id: str | None,
+    namespace: str | None,
 ) -> list[MemoryUnit]:
     """Remove units whose content already exists in the active store."""
-    existing = await store.list_active(user_id, scope_id, limit=500)
+    existing = await store.list_active(user_id, namespace, limit=500)
     if not existing:
         return units
     existing_content = {

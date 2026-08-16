@@ -29,7 +29,7 @@ class MemoryUnit:
     user_id: str
     memory_type: MemoryType
     content: str
-    scope_id: str | None = None
+    namespace: str | None = None
     source_session_id: str | None = None
     source_turn_start: int = 0
     source_turn_end: int = 0
@@ -54,7 +54,7 @@ class MemoryUnit:
 class MemoryQuery:
     user_id: str
     query_text: str
-    scope_id: str | None = None
+    namespace: str | None = None
     session_id: str | None = None
     top_k: int = 6
     max_tokens: int = 800

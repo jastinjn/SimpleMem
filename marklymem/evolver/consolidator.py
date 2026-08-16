@@ -31,8 +31,8 @@ class MemoryConsolidator:
         self.min_importance = max(0.0, min(1.0, min_importance))
         self.decay_mode = decay_mode if decay_mode in ("linear", "exponential") else "linear"
 
-    async def consolidate(self, user_id: str, scope_id: str | None = None) -> dict:
-        units = await self.store.list_active(user_id, scope_id, limit=2000)
+    async def consolidate(self, user_id: str, namespace: str | None = None) -> dict:
+        units = await self.store.list_active_exact(user_id, namespace, limit=2000)
         now = utc_now_iso()
         superseded = 0
         dropped: list[dict] = []
@@ -74,17 +74,17 @@ class MemoryConsolidator:
         result = {"superseded": superseded, "decayed": decayed, "reinforced": reinforced, "dropped": dropped}
         if superseded or decayed or reinforced:
             logger.info(
-                "[Consolidator] scope=%s superseded=%d decayed=%d reinforced=%d (pool=%d)",
-                scope_id, superseded, decayed, reinforced, len(units),
+                "[Consolidator] namespace=%s superseded=%d decayed=%d reinforced=%d (pool=%d)",
+                namespace, superseded, decayed, reinforced, len(units),
             )
         return result
 
-    async def dry_run(self, user_id: str, scope_id: str | None = None) -> dict:
+    async def dry_run(self, user_id: str, namespace: str | None = None) -> dict:
         """Preview what consolidation would do without applying changes.
 
         Returns counts and details of what would happen.
         """
-        units = await self.store.list_active(user_id, scope_id, limit=2000)
+        units = await self.store.list_active_exact(user_id, namespace, limit=2000)
 
         # Exact duplicates.
         seen: dict[tuple[str, str], str] = {}

@@ -182,7 +182,7 @@ async def test_field_mapping_from_entry():
     # entities = persons + entities, in that order.
     assert u.entities == ["Alice", "Persuasive Essay"]
     assert u.user_id == "user-1"
-    assert u.scope_id == "scope-1"
+    assert u.namespace == "scope-1"
     assert u.source_session_id == "sess-9"
     assert (u.source_turn_start, u.source_turn_end) == (1, 1)
     assert u.content == "Alice scored Level 4 on the persuasive essay task"

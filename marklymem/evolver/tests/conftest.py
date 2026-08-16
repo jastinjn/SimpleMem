@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: F401 — used by 
 
 from marklymem.evolver.models import MemoryType, MemoryUnit
 from marklymem.evolver.store import MemoryStore
-from marklymem.tests.utils.db import OTHER_SCOPE as SCOPE_B  # noqa: F401
+from marklymem.tests.utils.db import OTHER_NAMESPACE as NAMESPACE_B  # noqa: F401
 from marklymem.tests.utils.db import OTHER_USER as UID2  # noqa: F401
 from marklymem.tests.utils.db import USER_ID as UID  # noqa: F401
 from marklymem.tests.utils.db import create_test_units  # noqa: F401
@@ -65,7 +65,7 @@ def _make_unit(**overrides) -> MemoryUnit:
     defaults = dict(
         memory_id=f"mu-{n:04d}",
         user_id=UID,
-        scope_id="test",
+        namespace="test",
         memory_type=MemoryType.SEMANTIC,
         content=f"Memory unit content number {n}",
         entities=[],

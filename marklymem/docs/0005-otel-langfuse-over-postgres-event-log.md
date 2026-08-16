@@ -13,7 +13,7 @@ Use OpenTelemetry (OTLP/HTTP → Langfuse) as the sole observation platform for 
 - **`memory.ingest`**: `extract.session` → per-window `extract.window` generation spans (LLM calls with token usage) → `embedding` batch span with per-chunk `embedding.chunk` generation spans → `consolidate` span (output includes the content of every superseded memory).
 - **`memory.retrieve`**: `embedding` span (model, token count) → output is the retrieved memories with scores and content.
 
-Traces carry `langfuse.session.id`, `langfuse.user.id`, and `scope_id` metadata so every memory operation can be correlated to the originating conversation session in the Langfuse UI.
+Traces carry `langfuse.session.id`, `langfuse.user.id`, and `namespace` metadata so every memory operation can be correlated to the originating conversation session in the Langfuse UI.
 
 ## Considered Options
 

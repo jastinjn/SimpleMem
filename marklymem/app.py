@@ -2,8 +2,8 @@
 
 One shared ``MemoryStore`` + one process-wide ``MemoryManager`` are created in the
 lifespan handler. Tenant isolation is via the ``user_id`` (required) and optional
-``scope_id`` passed on every call — a single shared PostgreSQL DB with ``user_id`` and
-``scope_id`` columns (the evolver's native model).
+``namespace`` passed on every call — a single shared PostgreSQL DB with ``user_id`` and
+``namespace`` columns (the evolver's native model).
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ from .models import (
     AddDialogueRequest,
     AddResponse,
     ClearResponse,
-    CloneScopeRequest,
-    CloneScopeResponse,
+    CloneNamespaceRequest,
+    CloneNamespaceResponse,
     MemoryHit,
+    NamespacedRequest,
     RetrieveRequest,
     RetrieveResponse,
-    ScopedRequest,
     StatsResponse,
 )
 from .utils import telemetry
@@ -125,9 +125,9 @@ else:
     )
 
 
-def _set_request_context(request: Request, req: ScopedRequest) -> None:
+def _set_request_context(request: Request, req: NamespacedRequest) -> None:
     request.state.user_id = req.user_id
-    request.state.scope_id = req.scope_id
+    request.state.namespace = req.namespace
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_internal_api_key)])
@@ -143,12 +143,12 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     duration_ms = (time.perf_counter() - start) * 1000
     user_id = getattr(request.state, "user_id", None)
-    scope_id = getattr(request.state, "scope_id", None)
+    namespace = getattr(request.state, "namespace", None)
     log = logger.error if response.status_code >= 500 else logger.info
     log(
-        "%s %s %d %.1fms req_id=%s user_id=%s scope_id=%s",
+        "%s %s %d %.1fms req_id=%s user_id=%s namespace=%s",
         request.method, request.url.path, response.status_code, duration_ms,
-        req_id, user_id, scope_id,
+        req_id, user_id, namespace,
     )
     return response
 
@@ -164,17 +164,17 @@ def health() -> dict:
 
 @router.post("/memory/add_dialogue", response_model=AddResponse)
 async def memory_add_dialogue(req: AddDialogueRequest, request: Request) -> AddResponse:
-    """Ingest multiple dialogue turns into the caller's scope (max 50 turns)."""
+    """Ingest multiple dialogue turns into the caller's namespace (max 50 turns)."""
     _set_request_context(request, req)
     result = await _mgr(app).ingest_session_turns(
         req.session_id,
         [t.model_dump() for t in req.turns],
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
     )
     return AddResponse(
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
         session_id=req.session_id,
         units_added=result["added"],
         units_consolidated=result["superseded"],
@@ -183,11 +183,11 @@ async def memory_add_dialogue(req: AddDialogueRequest, request: Request) -> AddR
 
 @router.post("/memory/retrieve", response_model=RetrieveResponse)
 async def memory_retrieve(req: RetrieveRequest, request: Request) -> RetrieveResponse:
-    """Hybrid (semantic + lexical) search within the caller's scope."""
+    """Hybrid (semantic + lexical) search within the caller's namespace."""
     _set_request_context(request, req)
     query = MemoryQuery(
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
         session_id=req.session_id,
         query_text=req.query,
         top_k=req.top_k,
@@ -209,7 +209,7 @@ async def memory_retrieve(req: RetrieveRequest, request: Request) -> RetrieveRes
     ]
     return RetrieveResponse(
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
         query=req.query,
         results=results,
         total=len(results),
@@ -217,44 +217,48 @@ async def memory_retrieve(req: RetrieveRequest, request: Request) -> RetrieveRes
 
 
 @router.post("/memory/clear", response_model=ClearResponse)
-async def memory_clear(req: ScopedRequest, request: Request) -> ClearResponse:
-    """Soft-clear the caller's scope (archive all non-pinned active memories)."""
+async def memory_clear(req: NamespacedRequest, request: Request) -> ClearResponse:
+    """Soft-clear the caller's namespace (archive all non-pinned active memories)."""
     _set_request_context(request, req)
-    result = await _mgr(app).archive_scope(req.user_id, req.scope_id)
+    result = await _mgr(app).archive_namespace(req.user_id, req.namespace)
     return ClearResponse(
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
         archived=int(result.get("archived", 0)),
         pinned_kept=int(result.get("pinned_kept", 0)),
         total_before=int(result.get("total_before", 0)),
     )
 
 
-@router.post("/memory/clone_scope", response_model=CloneScopeResponse)
-async def memory_clone_scope(req: CloneScopeRequest, request: Request) -> CloneScopeResponse:
-    """Clone all active memories from one scope into another (new IDs, originals untouched)."""
+@router.post("/memory/clone_namespace", response_model=CloneNamespaceResponse)
+async def memory_clone_namespace(req: CloneNamespaceRequest, request: Request) -> CloneNamespaceResponse:
+    """Clone all active memories from one namespace into another (new IDs, originals untouched).
+
+    The clone is flat: every unit in the source subtree (e.g. proj, proj/api, proj/api/auth)
+    is written with namespace=target_namespace exactly. Branch structure is not preserved.
+    """
     request.state.user_id = req.user_id
-    result = await _mgr(app).clone_scope(
+    result = await _mgr(app).clone_namespace(
         req.user_id,
-        source_scope=req.source_scope,
-        target_scope=req.target_scope,
+        source_namespace=req.source_namespace,
+        target_namespace=req.target_namespace,
     )
-    return CloneScopeResponse(
+    return CloneNamespaceResponse(
         user_id=req.user_id,
-        source_scope=req.source_scope,
-        target_scope=req.target_scope,
+        source_namespace=req.source_namespace,
+        target_namespace=req.target_namespace,
         cloned=result["cloned"],
     )
 
 
 @router.post("/memory/stats", response_model=StatsResponse)
-async def memory_stats(req: ScopedRequest, request: Request) -> StatsResponse:
-    """Return memory counts for the caller's scope."""
+async def memory_stats(req: NamespacedRequest, request: Request) -> StatsResponse:
+    """Return memory counts for the caller's namespace."""
     _set_request_context(request, req)
-    stats = await _mgr(app).get_scope_stats(req.user_id, req.scope_id)
+    stats = await _mgr(app).get_namespace_stats(req.user_id, req.namespace)
     return StatsResponse(
         user_id=req.user_id,
-        scope_id=req.scope_id,
+        namespace=req.namespace,
         entry_count=int(stats.get("active", 0)),
         total=int(stats.get("total", 0)),
         superseded=int(stats.get("superseded", 0)),

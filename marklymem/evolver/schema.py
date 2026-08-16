@@ -25,14 +25,14 @@ class Memory(Base):
     __tablename__ = "memories"
     __table_args__ = (
         Index("idx_memories_user", "user_id"),
-        Index("idx_memories_user_scope", "user_id", "scope_id"),
-        Index("idx_memories_scope_status", "scope_id", "status"),
-        Index("idx_memories_scope_type", "scope_id", "memory_type"),
+        Index("idx_memories_user_namespace", "user_id", "namespace"),
+        Index("idx_memories_namespace_status", "namespace", "status"),
+        Index("idx_memories_namespace_type", "namespace", "memory_type"),
     )
 
     memory_id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
-    scope_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    namespace: Mapped[str | None] = mapped_column(String, nullable=True)
     memory_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_session_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
@@ -65,7 +65,7 @@ class Memory(Base):
         return MemoryUnit(
             memory_id=self.memory_id,
             user_id=self.user_id,
-            scope_id=self.scope_id,
+            namespace=self.namespace,
             memory_type=MemoryType(self.memory_type),
             content=self.content,
             source_session_id=self.source_session_id or None,
@@ -93,7 +93,7 @@ class Memory(Base):
         return Memory(
             memory_id=unit.memory_id,
             user_id=unit.user_id,
-            scope_id=unit.scope_id,
+            namespace=unit.namespace,
             memory_type=unit.memory_type.value,
             content=unit.content,
             source_session_id=unit.source_session_id,

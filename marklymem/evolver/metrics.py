@@ -3,8 +3,8 @@ from __future__ import annotations
 from .store import MemoryStore
 
 
-async def summarize_memory_store(store: MemoryStore, user_id: str, scope_id: str | None = None) -> dict:
-    stats = await store.get_stats(user_id, scope_id)
+async def summarize_memory_store(store: MemoryStore, user_id: str, namespace: str | None = None) -> dict:
+    stats = await store.get_stats(user_id, namespace)
     active_by_type = stats.get("active_by_type", {})
     active = int(stats.get("active", 0))
     total = int(stats.get("total", 0))

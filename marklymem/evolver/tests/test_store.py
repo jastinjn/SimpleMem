@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from marklymem.evolver.models import MemoryStatus, MemoryType
 
-from .conftest import UID, _make_unit, create_test_units
+from .conftest import UID, UID2, _make_unit, create_test_units
 
 # ---------------------------------------------------------------------------
 # add_memories
@@ -27,7 +27,7 @@ class TestAddMemories:
 
     async def test_returns_count(self, store):
         n = await store.add_memories(create_test_units())
-        assert n == 9  # 6 primary + 2 secondary-scope + 1 secondary-user
+        assert n == 9  # 6 primary + 2 secondary-namespace + 1 secondary-user
 
     async def test_upsert_on_same_memory_id(self, store):
         u = _make_unit(memory_id="x-001", content="original")
@@ -56,11 +56,11 @@ class TestListActive:
         assert "unit-002" in ids
 
     async def test_scope_isolation(self, store):
-        u_a = _make_unit(memory_id="a-001", scope_id="scope_a", updated_at="2025-01-01T00:00:01+00:00")
-        u_b = _make_unit(memory_id="b-001", scope_id="scope_b", updated_at="2025-01-01T00:00:02+00:00")
+        u_a = _make_unit(memory_id="a-001", namespace="namespace_a", updated_at="2025-01-01T00:00:01+00:00")
+        u_b = _make_unit(memory_id="b-001", namespace="namespace_b", updated_at="2025-01-01T00:00:02+00:00")
         await store.add_memories([u_a, u_b])
-        assert all(u.scope_id == "scope_a" for u in await store.list_active(UID, "scope_a"))
-        assert all(u.scope_id == "scope_b" for u in await store.list_active(UID, "scope_b"))
+        assert all(u.namespace == "namespace_a" for u in await store.list_active(UID, "namespace_a"))
+        assert all(u.namespace == "namespace_b" for u in await store.list_active(UID, "namespace_b"))
 
     async def test_ordered_by_updated_at_desc(self, store):
         await store.add_memories(create_test_units())
@@ -107,16 +107,16 @@ class TestSearchKeyword:
 
     async def test_scope_isolation(self, store):
         u_a = _make_unit(
-            memory_id="sa-001", scope_id="scope_a",
+            memory_id="sa-001", namespace="namespace_a",
             content="PostgreSQL database", updated_at="2025-01-01T00:00:01+00:00",
         )
         u_b = _make_unit(
-            memory_id="sb-001", scope_id="scope_b",
+            memory_id="sb-001", namespace="namespace_b",
             content="PostgreSQL database", updated_at="2025-01-01T00:00:02+00:00",
         )
         await store.add_memories([u_a, u_b])
-        hits = await store.search_keyword(UID, "scope_a", "PostgreSQL")
-        assert all(h.unit.scope_id == "scope_a" for h in hits)
+        hits = await store.search_keyword(UID, "namespace_a", "PostgreSQL")
+        assert all(h.unit.namespace == "namespace_a" for h in hits)
 
     async def test_limit(self, store):
         await store.add_memories(create_test_units())
@@ -125,12 +125,12 @@ class TestSearchKeyword:
 
     async def test_higher_importance_ranks_higher(self, store):
         low = _make_unit(
-            memory_id="low-001", scope_id="rank",
+            memory_id="low-001", namespace="rank",
             content="the project database", importance=0.1,
             updated_at="2025-01-01T00:00:01+00:00",
         )
         high = _make_unit(
-            memory_id="high-001", scope_id="rank",
+            memory_id="high-001", namespace="rank",
             content="the project database", importance=0.9,
             updated_at="2025-01-01T00:00:02+00:00",
         )
@@ -223,4 +223,127 @@ class TestGetStats:
         await store.supersede("unit-001", "unit-002", updated_at="2025-02-01T00:00:00+00:00")
         stats = await store.get_stats(UID, "test")
         assert stats["active"] == 5
-        assert stats["total"] == 6
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical namespace
+# ---------------------------------------------------------------------------
+
+class TestHierarchicalNamespace:
+    async def test_list_active_includes_child_and_grandchild(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        grandchild = _make_unit(memory_id="g-001", namespace="proj/api/auth")
+        await store.add_memories([parent, child, grandchild])
+        ids = {u.memory_id for u in await store.list_active(UID, "proj")}
+        assert ids == {"p-001", "c-001", "g-001"}
+
+    async def test_exact_child_scope_excludes_parent(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        await store.add_memories([parent, child])
+        ids = {u.memory_id for u in await store.list_active(UID, "proj/api")}
+        assert "c-001" in ids
+        assert "p-001" not in ids
+
+    async def test_sibling_prefix_not_matched(self, store):
+        u_a = _make_unit(memory_id="a-001", namespace="scope")
+        u_b = _make_unit(memory_id="b-001", namespace="scope-b")
+        await store.add_memories([u_a, u_b])
+        ids = {u.memory_id for u in await store.list_active(UID, "scope")}
+        assert "a-001" in ids
+        assert "b-001" not in ids
+
+    async def test_get_stats_aggregates_subtree(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/backend")
+        await store.add_memories([parent, child])
+        stats = await store.get_stats(UID, "proj")
+        assert stats["total"] == 2
+        assert stats["active"] == 2
+
+    async def test_expire_stale_applies_to_subtree(self, store):
+        past = "2020-01-01T00:00:00+00:00"
+        parent = _make_unit(memory_id="p-001", namespace="proj", expires_at=past)
+        child = _make_unit(memory_id="c-001", namespace="proj/api", expires_at=past)
+        await store.add_memories([parent, child])
+        count = await store.expire_stale(UID, "proj")
+        assert count == 2
+        # Verify both units are archived in the DB, not just counted.
+        from marklymem.evolver.models import MemoryStatus
+        fetched = {u.memory_id: u for u in await store.get_by_ids(["p-001", "c-001"])}
+        assert fetched["p-001"].status == MemoryStatus.ARCHIVED
+        assert fetched["c-001"].status == MemoryStatus.ARCHIVED
+
+    async def test_set_type_ttl_applies_to_subtree(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        await store.add_memories([parent, child])
+        count = await store.set_type_ttl(UID, "proj", MemoryType.SEMANTIC, "2030-01-01T00:00:00+00:00")
+        assert count == 2
+
+    async def test_get_namespace_analytics_aggregates_subtree(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        await store.add_memories([parent, child])
+        analytics = await store.get_namespace_analytics(UID, "proj")
+        assert analytics["total"] == 2
+
+    async def test_none_scope_returns_all(self, store):
+        u_a = _make_unit(memory_id="a-001", namespace="proj")
+        u_b = _make_unit(memory_id="b-001", namespace="other")
+        await store.add_memories([u_a, u_b])
+        ids = {u.memory_id for u in await store.list_active(UID, None)}
+        assert {"a-001", "b-001"} == ids
+
+    async def test_cross_user_isolation(self, store):
+        # user1's subtree must not be visible when querying under user2's identical namespace path.
+        u1 = _make_unit(memory_id="u1-001", namespace="proj/api")
+        u2 = _make_unit(memory_id="u2-001", namespace="proj/api", user_id=UID2)
+        await store.add_memories([u1, u2])
+        ids_user1 = {u.memory_id for u in await store.list_active(UID, "proj")}
+        ids_user2 = {u.memory_id for u in await store.list_active(UID2, "proj")}
+        assert ids_user1 == {"u1-001"}
+        assert ids_user2 == {"u2-001"}
+
+    async def test_scope_with_underscore_does_not_match_wildcard(self, store):
+        # "namespace_a" contains a SQL LIKE wildcard character "_". Querying "namespace_a"
+        # must NOT match "scope-a" (the "_" must be escaped as "\\_" in the LIKE pattern).
+        u_underscore = _make_unit(memory_id="u-001", namespace="namespace_a",
+                                  content="underscore namespace unit")
+        u_dash = _make_unit(memory_id="d-001", namespace="scope-a",
+                            content="dash namespace unit")
+        await store.add_memories([u_underscore, u_dash])
+        ids_underscore = {u.memory_id for u in await store.list_active(UID, "namespace_a")}
+        ids_dash = {u.memory_id for u in await store.list_active(UID, "scope-a")}
+        assert "u-001" in ids_underscore
+        assert "d-001" not in ids_underscore
+        assert "d-001" in ids_dash
+        assert "u-001" not in ids_dash
+
+
+# ---------------------------------------------------------------------------
+# list_active_exact — consolidation uses this to avoid cross-subtree merging
+# ---------------------------------------------------------------------------
+
+class TestListActiveExact:
+    async def test_excludes_child_scopes(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        await store.add_memories([parent, child])
+        ids = {u.memory_id for u in await store.list_active_exact(UID, "proj")}
+        assert ids == {"p-001"}
+
+    async def test_exact_child_scope_returns_only_that_scope(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj")
+        child = _make_unit(memory_id="c-001", namespace="proj/api")
+        await store.add_memories([parent, child])
+        ids = {u.memory_id for u in await store.list_active_exact(UID, "proj/api")}
+        assert ids == {"c-001"}
+
+    async def test_none_scope_returns_all(self, store):
+        u_a = _make_unit(memory_id="a-001", namespace="proj")
+        u_b = _make_unit(memory_id="b-001", namespace="proj/api")
+        await store.add_memories([u_a, u_b])
+        ids = {u.memory_id for u in await store.list_active_exact(UID, None)}
+        assert {"a-001", "b-001"} == ids

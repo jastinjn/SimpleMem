@@ -46,7 +46,7 @@ uv run pyright .                  # type check
 
 ## Architecture
 
-**Tenant isolation** — every request requires `user_id`. Optional `scope_id` narrows to a sub-context. No scope filter = queries across all scopes for that user.
+**Tenant isolation** — every request requires `user_id`. Optional `namespace` narrows to a sub-context. No namespace filter = queries across all namespaces for that user.
 
 **Write pipeline** — `MemoryManager.ingest_session_turns()` → extraction (LLM or pattern) → pre-ingestion dedup against store → local conflict detection → optional embedding → `MemoryStore.add_memories()` → auto-consolidation (dedup + decay) → returns `{added, superseded, decayed, reinforced}`.
 
@@ -68,5 +68,5 @@ Call sites use `telemetry.trace()` (root), `telemetry.span()` (child), `telemetr
 ## Key Constraints
 
 - `user_id` is required on every store/retriever call — never omit it.
-- `scope_id=None` means no scope filter (all scopes), not a default scope.
+- `namespace=None` on reads means no namespace filter (all namespaces returned); on writes it targets the null namespace. Reads are hierarchical — `"proj"` matches `"proj/api"`, `"proj/api/auth"`, etc. Writes and consolidation always target the exact namespace.
 - Self-evolution, policy optimisation, and benchmark modules have been removed — the engine is inference-only.

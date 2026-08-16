@@ -1,5 +1,7 @@
 # User ID as the primary memory partition key
 
+> **Superseded by** [ADR 0006 — Hierarchical namespaces over flat scope IDs](0006-hierarchical-namespace-over-flat-scope-id.md)
+
 ## Context
 
 SimpleMem originally partitioned memories by `scope_id` alone — a single key grouping related conversations (e.g. a class or assignment). In a multi-tenant API where many users share a single Aurora RDS instance, scope alone is insufficient: there is no guarantee that scope names are unique across users, and a query without a user boundary could return or overwrite another user's memories. Additionally, aggregating stats or archiving memories for a single user requires a reliable top-level key that spans all of their scopes.

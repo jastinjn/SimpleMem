@@ -26,8 +26,8 @@ def _policy(recency_weight: float = 0.0, **kwargs) -> MemoryPolicy:
     return MemoryPolicy(recency_weight=recency_weight, **kwargs)
 
 
-def _query(query_text: str, scope_id: str = "test", top_k: int = 6, **kwargs) -> MemoryQuery:
-    return MemoryQuery(user_id=UID, scope_id=scope_id, query_text=query_text, top_k=top_k, **kwargs)
+def _query(query_text: str, namespace: str = "test", top_k: int = 6, **kwargs) -> MemoryQuery:
+    return MemoryQuery(user_id=UID, namespace=namespace, query_text=query_text, top_k=top_k, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -81,17 +81,17 @@ class TestEmbeddingRetrieval:
 
     async def test_empty_embedding_units_skipped(self, store):
         embedder = HashingEmbedder(dimensions=1024)
-        u = _make_unit(memory_id="no-emb-001", scope_id="emb")
+        u = _make_unit(memory_id="no-emb-001", namespace="emb")
         u.embedding = []
         u2 = _make_unit(
-            memory_id="has-emb-001", scope_id="emb",
+            memory_id="has-emb-001", namespace="emb",
             content="database PostgreSQL server",
             updated_at="2025-01-01T00:00:02+00:00",
         )
         u2.embedding = embedder.encode(u2.content)
         await store.add_memories([u, u2])
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="embedding", embedder=embedder)
-        hits = await r.retrieve(_query("database", scope_id="emb"))
+        hits = await r.retrieve(_query("database", namespace="emb"))
         ids = {h.unit.memory_id for h in hits}
         assert "no-emb-001" not in ids
         assert "has-emb-001" in ids
@@ -110,7 +110,7 @@ class TestEmbeddingRetrieval:
             type_boosts={"semantic": 1.0},
         )
         u = _make_unit(
-            memory_id="score-001", scope_id="score_scope",
+            memory_id="score-001", namespace="score_scope",
             memory_type=MemoryType.SEMANTIC,
             content="PostgreSQL database server",
             importance=0.8,
@@ -121,7 +121,7 @@ class TestEmbeddingRetrieval:
         u.embedding = embedder.encode(u.content)
         await store.add_memories([u])
         r = MemoryRetriever(store, policy=policy, retrieval_mode="embedding", embedder=embedder)
-        hits = await r.retrieve(_query("PostgreSQL database server", scope_id="score_scope"))
+        hits = await r.retrieve(_query("PostgreSQL database server", namespace="score_scope"))
         assert len(hits) == 1
         from marklymem.evolver.embeddings import cosine_similarity
         sim = cosine_similarity(embedder.encode("PostgreSQL database server"), u.embedding)
@@ -167,20 +167,20 @@ class TestAutoMode:
         await store.add_memories(create_test_units())
         embedder = HashingEmbedder(dimensions=1024)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
-        q = MemoryQuery(user_id=UID, scope_id="test", query_text="db key")
+        q = MemoryQuery(user_id=UID, namespace="test", query_text="db key")
         mode = r._auto_select_mode(q)
         assert mode == "keyword"
 
     async def test_long_query_with_embedder_uses_hybrid(self, store):
         embedder = HashingEmbedder(dimensions=1024)
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=embedder)
-        q = MemoryQuery(user_id=UID, scope_id="test", query_text="the project uses PostgreSQL database backend")
+        q = MemoryQuery(user_id=UID, namespace="test", query_text="the project uses PostgreSQL database backend")
         mode = r._auto_select_mode(q)
         assert mode == "hybrid"
 
     async def test_long_query_without_embedder_uses_keyword(self, store):
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="auto", embedder=None)
-        q = MemoryQuery(user_id=UID, scope_id="test", query_text="the project uses PostgreSQL database backend")
+        q = MemoryQuery(user_id=UID, namespace="test", query_text="the project uses PostgreSQL database backend")
         mode = r._auto_select_mode(q)
         assert mode == "keyword"
 
@@ -202,15 +202,15 @@ class TestTagBoost:
 
     async def test_boost_capped_at_50_percent(self, store):
         u = _make_unit(
-            memory_id="tag-001", scope_id="tagtest",
+            memory_id="tag-001", namespace="tagtest",
             content="database authentication",
             tags=["t1", "t2", "t3", "t4", "t5"],
             updated_at="2025-01-01T00:00:01+00:00",
         )
         await store.add_memories([u])
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
-        hits_no_boost = await r.retrieve(_query("database", scope_id="tagtest"))
-        hits_boosted = await r.retrieve(_query("database", scope_id="tagtest",
+        hits_no_boost = await r.retrieve(_query("database", namespace="tagtest"))
+        hits_boosted = await r.retrieve(_query("database", namespace="tagtest",
                                                context_tags=["t1", "t2", "t3", "t4", "t5", "t6"]))
         if hits_no_boost and hits_boosted:
             ratio = hits_boosted[0].score / hits_no_boost[0].score
@@ -228,7 +228,7 @@ class TestRecencyBonus:
         old_ts = "2024-01-01T00:00:00+00:00"
 
         u_recent = _make_unit(
-            memory_id="recent-001", scope_id="rec",
+            memory_id="recent-001", namespace="rec",
             content="authentication system service",
             importance=0.5,
             updated_at=recent_ts,
@@ -236,7 +236,7 @@ class TestRecencyBonus:
         )
         u_recent.embedding = embedder.encode(u_recent.content)
         u_old = _make_unit(
-            memory_id="old-001", scope_id="rec",
+            memory_id="old-001", namespace="rec",
             content="authentication system service",
             importance=0.5,
             updated_at=old_ts,
@@ -248,7 +248,7 @@ class TestRecencyBonus:
                               keyword_weight=0.0, metadata_weight=0.0,
                               importance_weight=0.0)
         r = MemoryRetriever(store, policy=policy, retrieval_mode="hybrid", embedder=embedder)
-        hits = await r.retrieve(_query("authentication system", scope_id="rec"))
+        hits = await r.retrieve(_query("authentication system", namespace="rec"))
         scores = {h.unit.memory_id: h.score for h in hits}
         if "recent-001" in scores and "old-001" in scores:
             assert scores["recent-001"] > scores["old-001"]
@@ -270,3 +270,40 @@ class TestSortDeterminism:
         hits1 = [h.unit.memory_id for h in await r.retrieve(_query("the"))]
         hits2 = [h.unit.memory_id for h in await r.retrieve(_query("the"))]
         assert hits1 == hits2
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical namespace retrieval
+# ---------------------------------------------------------------------------
+
+class TestHierarchicalNamespaceRetrieval:
+    async def test_keyword_parent_retrieves_child_scope(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj", content="parent unit content")
+        child = _make_unit(memory_id="c-001", namespace="proj/api", content="child unit special")
+        await store.add_memories([parent, child])
+        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
+        hits = await r.retrieve(MemoryQuery(user_id=UID, namespace="proj", query_text="special", top_k=10))
+        ids = {h.unit.memory_id for h in hits}
+        assert "c-001" in ids
+
+    async def test_keyword_child_scope_excludes_parent(self, store):
+        parent = _make_unit(memory_id="p-001", namespace="proj", content="parent unit content")
+        child = _make_unit(memory_id="c-001", namespace="proj/api", content="child unit special")
+        await store.add_memories([parent, child])
+        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
+        # Query for child content inside proj/api — c-001 should be returned, p-001 should not.
+        hits = await r.retrieve(MemoryQuery(user_id=UID, namespace="proj/api", query_text="child special", top_k=10))
+        ids = {h.unit.memory_id for h in hits}
+        assert "c-001" in ids
+        assert "p-001" not in ids
+
+    async def test_sibling_scope_not_matched(self, store):
+        u_a = _make_unit(memory_id="a-001", namespace="proj", content="alpha content unique")
+        u_b = _make_unit(memory_id="b-001", namespace="proj-other", content="beta content unique")
+        await store.add_memories([u_a, u_b])
+        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
+        # Query for alpha content in proj — a-001 in, b-001 (sibling scope) out.
+        hits = await r.retrieve(MemoryQuery(user_id=UID, namespace="proj", query_text="alpha unique", top_k=10))
+        ids = {h.unit.memory_id for h in hits}
+        assert "a-001" in ids
+        assert "b-001" not in ids
