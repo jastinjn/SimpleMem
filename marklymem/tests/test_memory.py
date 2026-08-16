@@ -50,22 +50,6 @@ class TestMemoryAddDialogue:
         active = await app_state.list_active(USER_ID, SCOPE)
         assert any("helm" in u.content.lower() for u in active)
 
-    async def test_consolidates_after_add_dialogue(self, authed_client):
-        # Sending the same turn twice in one batch bypasses pre-store dedup,
-        # so both units are written and consolidation supersedes the older one.
-        r = await authed_client.post("/api/memory/add_dialogue", json={
-            "user_id": USER_ID,
-            "namespace": SCOPE,
-            "turns": [
-                {"prompt_text": "We deploy with Helm charts for all services", "response_text": "Got it."},
-                {"prompt_text": "We deploy with Helm charts for all services", "response_text": "Got it."},
-            ],
-        })
-        assert r.status_code == 200
-        body = r.json()
-        assert body["units_added"] > 0
-        assert body["units_consolidated"] >= 1
-
     async def test_does_not_write_to_other_scope(self, authed_client, app_state):
         await authed_client.post("/api/memory/add_dialogue", json={
             "user_id": USER_ID,

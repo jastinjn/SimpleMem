@@ -76,6 +76,7 @@ async def lifespan(app: FastAPI):
         store=store,
         retrieval_mode=settings.retrieval_mode,
         auto_consolidate=True,
+        auto_resolve=True,
         embedder=embedder,
         ingestion_mode=settings.ingestion_mode,
         llm_extractor=llm_extractor,
@@ -85,7 +86,7 @@ async def lifespan(app: FastAPI):
     print(
         f"[marklymem] ready — routes=/api/ db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
-        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True "
+        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True auto_resolve=True "
         f"tracing={'on' if tracing_enabled else 'off'}"
     )
     yield

@@ -346,7 +346,7 @@ def create_llm_extractor(settings) -> LLMMemoryExtractor | None:
                 instructions=instructions,
                 input=dialogue_text,
                 text_format=ExtractedEntries,
-                temperature=0.1,
+                temperature=0,
                 max_output_tokens=2048,
             )
             usage = getattr(response, "usage", None)

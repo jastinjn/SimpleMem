@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from marklymem.evolver.embeddings import HashingEmbedder, OpenAIEmbedder
 from marklymem.evolver.manager import MemoryManager
-from marklymem.evolver.models import MemoryType
+from marklymem.evolver.models import MemoryStatus, MemoryType
 from marklymem.evolver.policy import MemoryPolicy
 from marklymem.evolver.store import MemoryStore
 
@@ -27,6 +27,7 @@ def _manager(
     store: MemoryStore,
     *,
     auto_consolidate: bool = False,
+    auto_resolve: bool = True,
     retrieval_mode: str = "keyword",
     embedder=None,
     user_id: str = UID,
@@ -41,6 +42,7 @@ def _manager(
         user_id=user_id,
         namespace=namespace,
         auto_consolidate=auto_consolidate,
+        auto_resolve=auto_resolve,
         retrieval_mode=retrieval_mode,
         embedder=embedder,
         ingestion_mode=ingestion_mode,
@@ -167,6 +169,55 @@ class TestIngestSessionTurns:
         assert len(preference_units) == 1
         assert "not giving" in preference_units[0].content
 
+    async def test_consolidation_supersedes_near_duplicate_of_existing(self, store, monkeypatch, fake_uuid):
+        _patch_time(monkeypatch)
+        # A pre-existing near-duplicate of what the turn extracts. The ingested
+        # unit differs by a single trailing token ("promptly"), so it survives
+        # pre-store dedup (which keys on exact content) but the consolidator's
+        # near-duplicate pass (content-token Jaccard 0.9 ≥ 0.80) then supersedes
+        # one of the pair. Resolve is off to isolate consolidation.
+        existing = _make_unit(
+            memory_id="cons-001", namespace="test",
+            memory_type=MemoryType.PREFERENCE,
+            content="User preference: giving detailed written feedback on every essay promptly.",
+            importance=0.5,
+            created_at="2025-01-01T00:00:00+00:00",
+            updated_at="2025-01-01T00:00:00+00:00",
+        )
+        await store.add_memories([existing])
+        mgr = _manager(store, auto_consolidate=True, auto_resolve=False)
+        turns = [{"prompt_text": "I prefer giving detailed written feedback on every essay", "response_text": ""}]
+        result = await mgr.ingest_session_turns("sess-cons", turns)
+        assert result["superseded"] >= 1
+        active_prefs = [u for u in await store.list_active(UID, "test") if u.memory_type == MemoryType.PREFERENCE]
+        assert len(active_prefs) == 1
+
+    async def test_conflict_resolution_supersedes_contradicting_existing(self, store, monkeypatch, fake_uuid):
+        _patch_time(monkeypatch)
+        # A pre-existing preference that shares every topic with what the turn
+        # extracts but states the opposite. Content overlap is low, so it is not
+        # a near-duplicate and consolidation leaves it alone; the resolve step
+        # supersedes the older (existing) unit in favour of the fresh
+        # contradiction. Consolidation is off to isolate resolve.
+        existing = _make_unit(
+            memory_id="conf-001", namespace="test",
+            memory_type=MemoryType.PREFERENCE,
+            content="User preference: light minimal marking only.",
+            topics=["prefer", "heavy", "marking", "detailed", "grading", "comments"],
+            entities=[],
+            importance=0.5,
+            created_at="2025-01-01T00:00:00+00:00",
+            updated_at="2025-01-01T00:00:00+00:00",
+        )
+        await store.add_memories([existing])
+        mgr = _manager(store, auto_consolidate=False, auto_resolve=True)
+        turns = [{"prompt_text": "I prefer heavy marking with detailed grading comments", "response_text": ""}]
+        result = await mgr.ingest_session_turns("sess-conf", turns)
+        assert result["superseded"] >= 1
+        refetched = (await store.get_by_ids(["conf-001"]))[0]
+        assert refetched.status == MemoryStatus.SUPERSEDED
+        assert refetched.superseded_by is not None
+
     async def test_openai_embedder_called_during_ingestion(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
         from unittest.mock import AsyncMock, MagicMock
@@ -292,3 +343,77 @@ class TestRenderForPrompt:
         pos_pinned = rendered.find("pinned memory unit")
         pos_regular = rendered.find("regular memory unit")
         assert pos_pinned < pos_regular
+
+
+class TestConflictResolution:
+    """detect_conflicts / auto_resolve_conflicts — run on every ingest.
+
+    Uses explicit user_id (a required arg) rather than the manager's own
+    self.user_id, matching how the shared server manager invokes them.
+    """
+
+    def _conflicting_pair(self):
+        older = _make_unit(
+            memory_id="c-001", namespace="test",
+            memory_type=MemoryType.PREFERENCE,
+            content="Include the numerical mark in the feedback text",
+            topics=["marks", "feedback"],
+            created_at="2025-01-01T00:00:00+00:00",
+            updated_at="2025-01-01T00:00:00+00:00",
+        )
+        newer = _make_unit(
+            memory_id="c-002", namespace="test",
+            memory_type=MemoryType.PREFERENCE,
+            content="Never include the numerical mark in the feedback text",
+            topics=["marks", "feedback"],
+            created_at="2025-02-01T00:00:00+00:00",
+            updated_at="2025-02-01T00:00:00+00:00",
+        )
+        return older, newer
+
+    async def test_detect_flags_overlapping_different_content(self, store):
+        older, newer = self._conflicting_pair()
+        await store.add_memories([older, newer])
+        conflicts = await _manager(store).detect_conflicts(UID, "test")
+        assert len(conflicts) == 1
+        assert conflicts[0]["overlap"] == 1.0
+        assert conflicts[0]["type"] == MemoryType.PREFERENCE.value
+
+    async def test_detect_ignores_different_types(self, store):
+        older, newer = self._conflicting_pair()
+        newer.memory_type = MemoryType.SEMANTIC
+        await store.add_memories([older, newer])
+        assert await _manager(store).detect_conflicts(UID, "test") == []
+
+    async def test_resolve_supersedes_older_and_reports_dropped(self, store, monkeypatch):
+        _patch_time(monkeypatch)
+        older, newer = self._conflicting_pair()
+        await store.add_memories([older, newer])
+        result = await _manager(store).auto_resolve_conflicts(UID, "test")
+
+        assert result["resolved"] == 1
+        assert result["total_conflicts"] == 1
+        # The older unit is superseded by the newer one.
+        fetched = {u.memory_id: u for u in await store.get_by_ids(["c-001", "c-002"])}
+        assert fetched["c-001"].status == MemoryStatus.SUPERSEDED
+        assert fetched["c-001"].superseded_by == "c-002"
+        assert fetched["c-002"].status == MemoryStatus.ACTIVE
+        # Dropped payload mirrors the consolidate span's shape.
+        drop = result["dropped"][0]
+        assert drop["dropped_id"] == "c-001"
+        assert drop["kept_id"] == "c-002"
+        assert drop["reason"] == "conflict"
+        assert drop["dropped_content"] == older.content
+        assert drop["kept_content"] == newer.content
+
+    async def test_resolve_skips_pinned(self, store, monkeypatch):
+        _patch_time(monkeypatch)
+        older, newer = self._conflicting_pair()
+        newer.importance = 0.99  # pinned — must not be superseded away
+        await store.add_memories([older, newer])
+        result = await _manager(store).auto_resolve_conflicts(UID, "test")
+        assert result["resolved"] == 0
+        assert (await store.get_by_ids(["c-001"]))[0].status == MemoryStatus.ACTIVE
+
+    async def test_resolve_no_conflicts_returns_zero(self, store):
+        assert await _manager(store).auto_resolve_conflicts(UID, "test") == {"resolved": 0}

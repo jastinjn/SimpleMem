@@ -34,6 +34,7 @@ class MemoryManager:
         user_id: str = "",
         namespace: str = "default",
         auto_consolidate: bool = True,
+        auto_resolve: bool = True,
         retrieval_mode: str = "keyword",
         use_embeddings: bool = False,
         embedding_mode: str = "hashing",
@@ -47,6 +48,7 @@ class MemoryManager:
         self.user_id = user_id
         self.namespace = namespace
         self.auto_consolidate = auto_consolidate
+        self.auto_resolve = auto_resolve
         self.retrieval_mode = retrieval_mode
         self.ingestion_mode = ingestion_mode
         self.llm_extractor = llm_extractor
@@ -206,7 +208,7 @@ class MemoryManager:
 
         added = await self.store.add_memories(units)
 
-        consolidation_result: dict[str, int] = {}
+        consolidation_result: dict = {}
         if self.auto_consolidate:
             with telemetry.span("consolidate") as cons_span:
                 consolidation_result = await self.consolidator.consolidate(uid, ns)
@@ -215,6 +217,15 @@ class MemoryManager:
                 cons_span.set_attribute("reinforced", consolidation_result.get("reinforced", 0))
                 if consolidation_result.get("dropped"):
                     telemetry.set_output(cons_span, consolidation_result["dropped"])
+
+        conflict_result: dict = {}
+        if self.auto_resolve:
+            with telemetry.span("resolve") as conf_span:
+                conflict_result = await self.auto_resolve_conflicts(uid, ns)
+                conf_span.set_attribute("resolved", conflict_result.get("resolved", 0))
+                conf_span.set_attribute("total_conflicts", conflict_result.get("total_conflicts", 0))
+                if conflict_result.get("dropped"):
+                    telemetry.set_output(conf_span, conflict_result["dropped"])
         stats = await summarize_memory_store(self.store, uid, ns)
         logger.info(
             "[Memory] ingested %d memory units from session=%s namespace=%s active=%d dominant_type=%s",
@@ -227,7 +238,8 @@ class MemoryManager:
         self._notify("ingest", namespace=ns, session_id=session_id, added=added)
         return {
             "added": added,
-            "superseded": consolidation_result.get("superseded", 0),
+            "superseded": consolidation_result.get("superseded", 0)
+            + conflict_result.get("resolved", 0),
             "decayed": consolidation_result.get("decayed", 0),
             "reinforced": consolidation_result.get("reinforced", 0),
         }
@@ -368,14 +380,14 @@ class MemoryManager:
             "issues": issues,
         }
 
-    async def detect_conflicts(self, namespace: str | None = None) -> list[dict]:
+    async def detect_conflicts(self, user_id: str, namespace: str | None = None) -> list[dict]:
         """Detect potential contradictions within the active memory pool.
 
         Compares all active memories of the same type that share significant
         topic/entity overlap but have different content.
         """
         ns = namespace or self.namespace
-        units = await self.store.list_active(self.user_id, ns, limit=500)
+        units = await self.store.list_active(user_id, ns, limit=500)
         if len(units) < 2:
             return []
 
@@ -587,19 +599,20 @@ class MemoryManager:
         """Compare two scopes to find shared and unique memories."""
         return await self.store.compare_namespaces(self.user_id, namespace_a, namespace_b)
 
-    async def auto_resolve_conflicts(self, namespace: str | None = None) -> dict:
+    async def auto_resolve_conflicts(self, user_id: str, namespace: str | None = None) -> dict:
         """Automatically resolve conflicts by superseding older memories.
 
         When two same-type memories overlap significantly but have different
         content, the older one is superseded by the newer one.
         """
         ns = namespace or self.namespace
-        conflicts = await self.detect_conflicts(ns)
+        conflicts = await self.detect_conflicts(user_id, ns)
         if not conflicts:
             return {"resolved": 0}
 
         now = utc_now_iso()
         resolved = 0
+        dropped: list[dict] = []
         for c in conflicts:
             a = await self.store.get_by_id(c["id_a"])
             b = await self.store.get_by_id(c["id_b"])
@@ -611,15 +624,26 @@ class MemoryManager:
             if a.importance >= 0.99 or b.importance >= 0.99:
                 continue
             # Supersede the older one.
-            if a.created_at <= b.created_at:
-                await self.store.supersede(a.memory_id, b.memory_id, now)
-            else:
-                await self.store.supersede(b.memory_id, a.memory_id, now)
+            drop, keep = (a, b) if a.created_at <= b.created_at else (b, a)
+            await self.store.supersede(drop.memory_id, keep.memory_id, now)
+            dropped.append({
+                "dropped_id": drop.memory_id,
+                "kept_id": keep.memory_id,
+                "reason": "conflict",
+                "type": drop.memory_type.value,
+                "overlap": c["overlap"],
+                "dropped_content": drop.content,
+                "kept_content": keep.content,
+            })
             resolved += 1
 
-        result = {"resolved": resolved, "total_conflicts": len(conflicts)}
-        self._notify("conflict_resolution", namespace=namespace, **result)
-        return result
+        self._notify(
+            "conflict_resolution",
+            namespace=namespace,
+            resolved=resolved,
+            total_conflicts=len(conflicts),
+        )
+        return {"resolved": resolved, "total_conflicts": len(conflicts), "dropped": dropped}
 
     async def rebalance_importance(self, namespace: str | None = None) -> dict:
         """Rebalance importance distribution to prevent clustering.
@@ -703,7 +727,7 @@ class MemoryManager:
             if len(group) > max_per_type:
                 lines.append(f"  ... and {len(group) - max_per_type} more")
 
-        conflicts = await self.detect_conflicts(ns)
+        conflicts = await self.detect_conflicts(self.user_id, ns)
         if conflicts:
             lines.append(f"\nPotential conflicts: {len(conflicts)}")
             for c in conflicts[:3]:
@@ -3742,7 +3766,9 @@ def _jaccard_conflict(
     b: MemoryUnit,
     threshold: float = 0.65,
 ) -> float | None:
-    """Return Jaccard overlap if a and b genuinely conflict, else None."""
+    """Return topics+entities Jaccard overlap for same-type units above
+    threshold, else None. Identical content is no longer exempt — callers
+    rely on upstream dedup to remove exact duplicates before this runs."""
     if a.memory_type != b.memory_type:
         return None
     a_terms = set(t.lower() for t in a.topics + a.entities)
@@ -3752,19 +3778,20 @@ def _jaccard_conflict(
     overlap = len(a_terms & b_terms) / float(len(a_terms | b_terms))
     if overlap < threshold:
         return None
-    if a.content.strip().lower() == b.content.strip().lower():
-        return None
     return round(overlap, 4)
 
 
 def _detect_local_conflicts(
     units: list[MemoryUnit],
-    threshold: float = 0.65,
+    threshold: float = 0.80,
 ) -> list[dict]:
     """Find conflicts within a batch of not-yet-persisted units.
 
     Compares units pairwise. The unit from the earlier turn
     (lower source_turn_start) is labelled 'earlier' and should be dropped.
+
+    The threshold matches the consolidator's near-duplicate similarity
+    (0.80) so within-batch and cross-batch overlap are judged consistently.
     """
     conflicts = []
     seen: set[tuple[str, str]] = set()
