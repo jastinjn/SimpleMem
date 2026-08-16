@@ -14,6 +14,7 @@ from .llm_extractor import LLMMemoryExtractor
 from .metrics import summarize_memory_store
 from .models import MemoryQuery, MemoryStatus, MemoryType, MemoryUnit, utc_now_iso
 from .policy import MemoryPolicy
+from .resolver import ConflictResolver
 from .retriever import MemoryRetriever
 from .store import MemoryStore
 
@@ -42,6 +43,8 @@ class MemoryManager:
         embedder: BaseEmbedder | None = None,
         ingestion_mode: str = "pattern",
         llm_extractor: LLMMemoryExtractor | None = None,
+        resolution_mode: str = "jaccard",
+        resolver: ConflictResolver | None = None,
     ):
         self.store = store
         self.policy = policy or MemoryPolicy()
@@ -52,6 +55,8 @@ class MemoryManager:
         self.retrieval_mode = retrieval_mode
         self.ingestion_mode = ingestion_mode
         self.llm_extractor = llm_extractor
+        self.resolution_mode = resolution_mode
+        self.resolver = resolver
         self.use_embeddings = use_embeddings or retrieval_mode in {"embedding", "hybrid"}
         self.embedding_mode = embedding_mode
         self.embedding_model = embedding_model
@@ -115,6 +120,12 @@ class MemoryManager:
             root.set_attribute("superseded", result["superseded"])
             root.set_attribute("decayed", result["decayed"])
             root.set_attribute("reinforced", result["reinforced"])
+            surviving = result.pop("surviving_new_units")
+            if surviving:
+                telemetry.set_output(root, [
+                    {"content": u.content, "type": u.memory_type.value}
+                    for u in surviving
+                ])
             return result
 
     async def _ingest_session_turns(
@@ -123,7 +134,7 @@ class MemoryManager:
         turns: list[dict],
         uid: str,
         ns: str,
-    ) -> dict[str, int]:
+    ) -> dict:
         """Inner ingestion pipeline; wrapped by :meth:`ingest_session_turns` in a root span."""
         mode = self.ingestion_mode
         units: list[MemoryUnit] = []
@@ -191,12 +202,6 @@ class MemoryManager:
                 len(drop_local),
             )
 
-        # Detect potential conflicts with existing memories.
-        conflicts = await _detect_conflicts(units, self.store, uid, ns)
-        if conflicts:
-            logger.info("[Memory] detected %d conflicts with existing memories", len(conflicts))
-            self._notify("conflicts_detected", namespace=ns, count=len(conflicts))
-
         if self.embedder is not None:
             texts = [
                 " ".join([u.content, " ".join(u.topics), " ".join(u.entities)])
@@ -221,11 +226,20 @@ class MemoryManager:
         conflict_result: dict = {}
         if self.auto_resolve:
             with telemetry.span("resolve") as conf_span:
-                conflict_result = await self.auto_resolve_conflicts(uid, ns)
+                if self.resolution_mode == "llm" and self.resolver is not None:
+                    conflict_result = await self.resolver.resolve(uid, ns, units)
+                else:
+                    conflict_result = await self.auto_resolve_conflicts(uid, ns)
                 conf_span.set_attribute("resolved", conflict_result.get("resolved", 0))
-                conf_span.set_attribute("total_conflicts", conflict_result.get("total_conflicts", 0))
                 if conflict_result.get("dropped"):
                     telemetry.set_output(conf_span, conflict_result["dropped"])
+
+        dropped_ids = (
+            {d["dropped_id"] for d in consolidation_result.get("dropped", [])}
+            | {d["dropped_id"] for d in conflict_result.get("dropped", [])}
+        )
+        surviving_new_units = [u for u in units if u.memory_id not in dropped_ids]
+
         stats = await summarize_memory_store(self.store, uid, ns)
         logger.info(
             "[Memory] ingested %d memory units from session=%s namespace=%s active=%d dominant_type=%s",
@@ -235,13 +249,14 @@ class MemoryManager:
             stats.get("active", 0),
             stats.get("dominant_type", ""),
         )
-        self._notify("ingest", namespace=ns, session_id=session_id, added=added)
+        self._notify("ingest", namespace=ns, session_id=session_id, added=len(surviving_new_units))
         return {
-            "added": added,
+            "added": len(surviving_new_units),
             "superseded": consolidation_result.get("superseded", 0)
             + conflict_result.get("resolved", 0),
             "decayed": consolidation_result.get("decayed", 0),
             "reinforced": consolidation_result.get("reinforced", 0),
+            "surviving_new_units": surviving_new_units,
         }
 
     async def render_for_prompt(self, units: list[MemoryUnit], include_pool_context: bool = False) -> str:
@@ -3818,39 +3833,6 @@ def _detect_local_conflicts(
             })
     return conflicts
 
-
-async def _detect_conflicts(
-    new_units: list[MemoryUnit],
-    store: MemoryStore,
-    user_id: str,
-    namespace: str | None,
-    similarity_threshold: float = 0.65,
-) -> list[dict]:
-    """Detect potential conflicts between new and existing memories.
-
-    Finds cases where new memories share significant topic/entity overlap
-    with existing memories but have different content, which may indicate
-    contradictory information.
-    """
-    existing = await store.list_active(user_id, namespace, limit=500)
-    if not existing:
-        return []
-
-    conflicts: list[dict] = []
-    for new_unit in new_units:
-        for old_unit in existing:
-            overlap = _jaccard_conflict(new_unit, old_unit, similarity_threshold)
-            if overlap is None:
-                continue
-            conflicts.append({
-                "new_id": new_unit.memory_id,
-                "existing_id": old_unit.memory_id,
-                "type": new_unit.memory_type.value,
-                "overlap": overlap,
-                "new_content": new_unit.content[:120],
-                "existing_content": old_unit.content[:120],
-            })
-    return conflicts
 
 
 async def _dedup_against_store(

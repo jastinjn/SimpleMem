@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     embedding_dim: int = 1024
     db_pool_size: int = 10
     db_max_overflow: int = 20
-    ingestion_mode: str = "llm" # "pattern" or "llm"
+    ingestion_mode: str = "llm"        # "pattern" or "llm"
+    resolution_mode: str = "llm"       # "jaccard" or "llm"
     retrieval_mode: str = "hybrid" # "keyword", "embedding", "hybrid", or "auto"
     embedder_mode: str = "semantic" # "hashing" or "semantic"
     default_top_k: int = 10

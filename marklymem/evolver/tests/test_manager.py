@@ -34,6 +34,8 @@ def _manager(
     namespace: str = "test",
     ingestion_mode: str = "pattern",
     llm_extractor=None,
+    resolution_mode: str = "jaccard",
+    resolver=None,
 ) -> MemoryManager:
     policy = MemoryPolicy(recency_weight=0.0)
     return MemoryManager(
@@ -47,6 +49,8 @@ def _manager(
         embedder=embedder,
         ingestion_mode=ingestion_mode,
         llm_extractor=llm_extractor,
+        resolution_mode=resolution_mode,
+        resolver=resolver,
     )
 
 
@@ -194,23 +198,41 @@ class TestIngestSessionTurns:
 
     async def test_conflict_resolution_supersedes_contradicting_existing(self, store, monkeypatch, fake_uuid):
         _patch_time(monkeypatch)
-        # A pre-existing preference that shares every topic with what the turn
-        # extracts but states the opposite. Content overlap is low, so it is not
-        # a near-duplicate and consolidation leaves it alone; the resolve step
-        # supersedes the older (existing) unit in favour of the fresh
-        # contradiction. Consolidation is off to isolate resolve.
+        from marklymem.evolver.embeddings import HashingEmbedder
+        from marklymem.evolver.resolver import (
+            BatchVerdict,
+            CandidatePair,
+            ConflictRelationship,
+            ConflictResolver,
+            PairVerdict,
+            ResolverConfig,
+        )
+
+        embedder = HashingEmbedder(dimensions=1024)
+
+        async def _always_contradiction(pairs: list[CandidatePair]) -> BatchVerdict:
+            return BatchVerdict(verdicts=[
+                PairVerdict(relationship=ConflictRelationship.CONTRADICTION)
+                for _ in pairs
+            ])
+
+        resolver = ConflictResolver(
+            store, embedder, _always_contradiction,
+            config=ResolverConfig(cosine_threshold=0.0),
+        )
+
         existing = _make_unit(
             memory_id="conf-001", namespace="test",
             memory_type=MemoryType.PREFERENCE,
             content="User preference: light minimal marking only.",
-            topics=["prefer", "heavy", "marking", "detailed", "grading", "comments"],
-            entities=[],
             importance=0.5,
             created_at="2025-01-01T00:00:00+00:00",
             updated_at="2025-01-01T00:00:00+00:00",
         )
+        existing.embedding = embedder.encode(existing.content)
         await store.add_memories([existing])
-        mgr = _manager(store, auto_consolidate=False, auto_resolve=True)
+        mgr = _manager(store, auto_consolidate=False, auto_resolve=True,
+                       embedder=embedder, resolution_mode="llm", resolver=resolver)
         turns = [{"prompt_text": "I prefer heavy marking with detailed grading comments", "response_text": ""}]
         result = await mgr.ingest_session_turns("sess-conf", turns)
         assert result["superseded"] >= 1
@@ -346,10 +368,11 @@ class TestRenderForPrompt:
 
 
 class TestConflictResolution:
-    """detect_conflicts / auto_resolve_conflicts — run on every ingest.
+    """detect_conflicts / auto_resolve_conflicts — admin/manual path.
 
-    Uses explicit user_id (a required arg) rather than the manager's own
-    self.user_id, matching how the shared server manager invokes them.
+    These methods are no longer wired into ingest; they are tested here
+    as standalone admin operations. Uses explicit user_id (a required arg)
+    rather than the manager's own self.user_id.
     """
 
     def _conflicting_pair(self):

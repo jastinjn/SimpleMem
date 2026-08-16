@@ -181,10 +181,9 @@ class LLMMemoryExtractor:
             sem = asyncio.Semaphore(max(1, self.config.max_parallel))
 
             async def _run(window: list[dict], start: int, end: int) -> list[MemoryUnit]:
-                async with sem:
-                    return await self._extract_window(
-                        window, start, end, user_id, namespace, session_id
-                    )
+                return await self._extract_window(
+                    window, start, end, user_id, namespace, session_id, sem
+                )
 
             results = await asyncio.gather(
                 *(_run(w, s, e) for (w, s, e) in windows),
@@ -245,6 +244,7 @@ class LLMMemoryExtractor:
         user_id: str,
         namespace: str,
         session_id: str | None,
+        sem: asyncio.Semaphore | None = None,
     ) -> list[MemoryUnit]:
         dialogue_text = self._render_dialogue(turns)
         if len(dialogue_text.strip()) < 30:
@@ -252,7 +252,11 @@ class LLMMemoryExtractor:
 
         for attempt in range(self.config.max_retries):
             try:
-                parsed = await self.llm_acall(EXTRACTION_INSTRUCTIONS, dialogue_text)
+                if sem is not None:
+                    async with sem:
+                        parsed = await self.llm_acall(EXTRACTION_INSTRUCTIONS, dialogue_text)
+                else:
+                    parsed = await self.llm_acall(EXTRACTION_INSTRUCTIONS, dialogue_text)
             except Exception as exc:  # noqa: BLE001 - retry on transient LLM errors
                 logger.debug(
                     "[LLM extract] window %d-%d attempt %d error: %s",

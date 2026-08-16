@@ -21,6 +21,7 @@ from marklymem.evolver.embeddings import create_embedder
 from marklymem.evolver.llm_extractor import create_llm_extractor
 from marklymem.evolver.manager import MemoryManager
 from marklymem.evolver.models import MemoryQuery
+from marklymem.evolver.resolver import create_conflict_resolver
 from marklymem.evolver.store import MemoryStore
 
 from .config import get_settings
@@ -72,6 +73,8 @@ async def lifespan(app: FastAPI):
         if len(settings.INTERNAL_API_KEY) < 32:
             raise RuntimeError("INTERNAL_API_KEY must be at least 32 characters")
 
+    resolver = create_conflict_resolver(settings, store, embedder=embedder)
+
     mgr = MemoryManager(
         store=store,
         retrieval_mode=settings.retrieval_mode,
@@ -80,14 +83,16 @@ async def lifespan(app: FastAPI):
         embedder=embedder,
         ingestion_mode=settings.ingestion_mode,
         llm_extractor=llm_extractor,
+        resolution_mode=settings.resolution_mode,
+        resolver=resolver,
     )
     app.state.store = store
     app.state.mgr = mgr
     print(
         f"[marklymem] ready — routes=/api/ db={settings.DATABASE_URL!r} "
         f"retrieval_mode={settings.retrieval_mode} embedder={settings.embedder_mode} "
-        f"ingestion_mode={settings.ingestion_mode} auto_consolidate=True auto_resolve=True "
-        f"tracing={'on' if tracing_enabled else 'off'}"
+        f"ingestion_mode={settings.ingestion_mode} resolution_mode={settings.resolution_mode} "
+        f"auto_consolidate=True auto_resolve=True tracing={'on' if tracing_enabled else 'off'}"
     )
     yield
     try:
