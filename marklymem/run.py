@@ -1,6 +1,6 @@
 """Launcher for the Evolver API server.
 
-    uv run python run.py --port 8100
+    uv run python run.py
 
 Uses the uvicorn import-string form so ``--reload`` works.
 """

@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     FASTAPI_HOST: str = "localhost"
-    FASTAPI_PORT: int = 8100
+    FASTAPI_PORT: int = 8000
     DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5442/simplemem"
     embedding_dim: int = 1024
     db_pool_size: int = 10
@@ -18,7 +18,6 @@ class Settings(BaseSettings):
     resolution_mode: str = "llm"       # "jaccard" or "llm"
     retrieval_mode: str = "hybrid" # "keyword", "embedding", "hybrid", or "auto"
     embedder_mode: str = "semantic" # "hashing" or "semantic"
-    default_top_k: int = 10
     cors_allowed_origins: str = "*"
     OPENAI_API_KEY: str = ""
 
