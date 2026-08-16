@@ -23,9 +23,7 @@ from marklymem.evolver.manager import MemoryManager
 from marklymem.evolver.models import MemoryQuery
 from marklymem.evolver.store import MemoryStore
 
-from .utils import telemetry
 from .config import get_settings
-from .utils.auth import verify_internal_api_key
 from .models import (
     AddBatchRequest,
     AddRequest,
@@ -37,6 +35,8 @@ from .models import (
     ScopedRequest,
     StatsResponse,
 )
+from .utils import telemetry
+from .utils.auth import verify_internal_api_key
 
 logger = logging.getLogger(__name__)
 
