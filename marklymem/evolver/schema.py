@@ -4,13 +4,14 @@ import os
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Computed,
     Float,
     Index,
     Integer,
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -28,6 +29,11 @@ class Memory(Base):
         Index("idx_memories_user_namespace", "user_id", "namespace"),
         Index("idx_memories_namespace_status", "namespace", "status"),
         Index("idx_memories_namespace_type", "namespace", "memory_type"),
+        Index("idx_memories_content_tsv", "content_tsv", postgresql_using="gin"),
+        Index("idx_memories_embedding", "embedding", postgresql_using="hnsw",
+              postgresql_ops={"embedding": "vector_cosine_ops"}),
+        Index("ix_memories_namespace_pattern", "namespace",
+              postgresql_ops={"namespace": "text_pattern_ops"}),
     )
 
     memory_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -54,10 +60,9 @@ class Memory(Base):
     expires_at: Mapped[str] = mapped_column(String, default="")
     tags: Mapped[list] = mapped_column(JSONB, default=list)
     content_tsv: Mapped[str | None] = mapped_column(
-        "content_tsv",
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(content,''))", persisted=True),
         nullable=True,
-        # The Computed column is defined in the Alembic migration via raw DDL.
-        # This declaration is only informational for the ORM.
         deferred=True,
     )
 

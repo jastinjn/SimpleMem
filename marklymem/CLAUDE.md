@@ -28,11 +28,22 @@ All settings are configured via `.env` (see `.env.example`).
 
 ## Migrations
 
+`evolver/schema.py` (the SQLAlchemy model) is the **single source of truth**. Don't hand-write migration DDL — edit the model, then autogenerate:
+
 ```bash
 cd marklymem
-uv run alembic upgrade head
-uv run alembic revision --autogenerate -m "description"
+uv run alembic revision --autogenerate -m "description"   # diff model → migration
+uv run alembic upgrade head                               # apply
+uv run alembic check                                      # verify zero drift (model vs DB)
 ```
+
+Migration files under `alembic/versions/` are machine-generated and excluded from ruff.
+
+Gotchas:
+
+- **`CREATE EXTENSION vector`** is a pgvector prerequisite, not schema, so autogenerate never emits it. It's a hand-added `op.execute("CREATE EXTENSION IF NOT EXISTS vector")` at the top of the initial migration's `upgrade()`.
+- **Autogenerating a `Vector` column** renders a broken type reference (`pgvector.sqlalchemy.vector.VECTOR(...)` with no import). Fix it by hand in the generated file: `from pgvector.sqlalchemy import Vector` + `Vector(<dim>)`.
+- **Never** run `connection.execute(...)` before `context.begin_transaction()` in `env.py`'s `do_run_migrations` — it opens an implicit transaction that suppresses Alembic's commit, so migrations silently roll back (empty `alembic_version`, no tables) while still reporting success.
 
 ## Tests
 
