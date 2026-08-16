@@ -14,23 +14,23 @@ from marklymem.tests.utils.db import (
 )
 
 
-class TestMemoryAddBatch:
+class TestMemoryAddDialogue:
     async def test_missing_key_returns_403(self, unauthed_client):
-        r = await unauthed_client.post("/api/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": [{"prompt_text": "hi", "response_text": "hello"}]})
+        r = await unauthed_client.post("/api/memory/add_dialogue", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": [{"prompt_text": "hi", "response_text": "hello"}]})
         assert r.status_code == 403
 
     async def test_missing_user_id_is_422(self, authed_client):
-        assert (await authed_client.post("/api/memory/add_batch", json={"turns": [{"prompt_text": "hi"}]})).status_code == 422
+        assert (await authed_client.post("/api/memory/add_dialogue", json={"turns": [{"prompt_text": "hi"}]})).status_code == 422
 
     async def test_empty_turns_is_422(self, authed_client):
-        assert (await authed_client.post("/api/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": []})).status_code == 422
+        assert (await authed_client.post("/api/memory/add_dialogue", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": []})).status_code == 422
 
     async def test_over_50_turns_is_422(self, authed_client):
         turns = [{"prompt_text": f"Turn {i}", "response_text": "Ok."} for i in range(51)]
-        assert (await authed_client.post("/api/memory/add_batch", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": turns})).status_code == 422
+        assert (await authed_client.post("/api/memory/add_dialogue", json={"user_id": USER_ID, "scope_id": SCOPE, "turns": turns})).status_code == 422
 
     async def test_returns_units_added(self, authed_client):
-        r = await authed_client.post("/api/memory/add_batch", json={
+        r = await authed_client.post("/api/memory/add_dialogue", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
             "turns": [
@@ -42,7 +42,7 @@ class TestMemoryAddBatch:
         assert r.json()["units_added"] > 0
 
     async def test_new_content_is_persisted(self, authed_client, app_state):
-        await authed_client.post("/api/memory/add_batch", json={
+        await authed_client.post("/api/memory/add_dialogue", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
             "turns": [{"prompt_text": "We use Helm for Kubernetes package management", "response_text": "Got it."}],
@@ -50,10 +50,10 @@ class TestMemoryAddBatch:
         active = await app_state.list_active(USER_ID, SCOPE)
         assert any("helm" in u.content.lower() for u in active)
 
-    async def test_consolidates_after_add_batch(self, authed_client):
+    async def test_consolidates_after_add_dialogue(self, authed_client):
         # Sending the same turn twice in one batch bypasses pre-store dedup,
         # so both units are written and consolidation supersedes the older one.
-        r = await authed_client.post("/api/memory/add_batch", json={
+        r = await authed_client.post("/api/memory/add_dialogue", json={
             "user_id": USER_ID,
             "scope_id": SCOPE,
             "turns": [
@@ -67,7 +67,7 @@ class TestMemoryAddBatch:
         assert body["units_consolidated"] >= 1
 
     async def test_does_not_write_to_other_scope(self, authed_client, app_state):
-        await authed_client.post("/api/memory/add_batch", json={
+        await authed_client.post("/api/memory/add_dialogue", json={
             "user_id": USER_ID,
             "scope_id": OTHER_SCOPE,
             "turns": [{"prompt_text": "The project uses PostgreSQL as the primary database", "response_text": "Understood."}],

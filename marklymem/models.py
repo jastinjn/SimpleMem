@@ -29,7 +29,7 @@ class TurnIn(BaseModel):
         return self
 
 
-class AddBatchRequest(ScopedRequest):
+class AddDialogueRequest(ScopedRequest):
     session_id: str | None = Field(None)
     turns: list[TurnIn] = Field(..., min_length=1, max_length=50)
 

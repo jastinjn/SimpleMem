@@ -25,7 +25,7 @@ from marklymem.evolver.store import MemoryStore
 
 from .config import get_settings
 from .models import (
-    AddBatchRequest,
+    AddDialogueRequest,
     AddResponse,
     ClearResponse,
     MemoryHit,
@@ -160,8 +160,8 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@router.post("/memory/add_batch", response_model=AddResponse)
-async def memory_add_batch(req: AddBatchRequest, request: Request) -> AddResponse:
+@router.post("/memory/add_dialogue", response_model=AddResponse)
+async def memory_add_dialogue(req: AddDialogueRequest, request: Request) -> AddResponse:
     """Ingest multiple dialogue turns into the caller's scope (max 50 turns)."""
     _set_request_context(request, req)
     result = await _mgr(app).ingest_session_turns(
