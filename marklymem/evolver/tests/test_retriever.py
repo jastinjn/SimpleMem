@@ -26,7 +26,7 @@ def _policy(recency_weight: float = 0.0, **kwargs) -> MemoryPolicy:
     return MemoryPolicy(recency_weight=recency_weight, **kwargs)
 
 
-def _query(query_text: str, namespace: str = "test", top_k: int = 6, **kwargs) -> MemoryQuery:
+def _query(query_text: str, namespace: str | None = "test", top_k: int = 6, **kwargs) -> MemoryQuery:
     return MemoryQuery(user_id=UID, namespace=namespace, query_text=query_text, top_k=top_k, **kwargs)
 
 
@@ -59,6 +59,20 @@ class TestKeywordRetrieval:
         r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
         hits = await r.retrieve(_query("database"))
         assert all(h.score > 0 for h in hits)
+
+    async def test_none_scope_searches_all_namespaces(self, store):
+        # "Terraform" lives in UID's "test-b" namespace; a None-scope query spans it.
+        await store.add_memories(create_test_units())
+        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
+        hits = await r.retrieve(_query("Terraform", namespace=None))
+        assert any(h.unit.memory_id == "unit-s01" for h in hits)
+
+    async def test_cross_user_isolation(self, store):
+        # unit-u01 ("Ansible") belongs to OTHER_USER in the same namespace; UID must not see it.
+        await store.add_memories(create_test_units())
+        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
+        hits = await r.retrieve(_query("Ansible"))
+        assert hits == []
 
 
 # ---------------------------------------------------------------------------

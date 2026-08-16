@@ -224,6 +224,19 @@ class TestGetStats:
         stats = await store.get_stats(UID, "test")
         assert stats["active"] == 5
 
+    async def test_empty_scope_returns_zeros(self, store):
+        await store.add_memories(create_test_units())
+        stats = await store.get_stats(UID, "no-such-scope")
+        assert stats["total"] == 0
+        assert stats["active"] == 0
+
+    async def test_none_scope_sums_user_namespaces_excluding_other_users(self, store):
+        # UID owns 6 units in "test" + 2 in "test-b"; UID2 owns 1 in "test".
+        # A None-scope query aggregates only the querying user's namespaces.
+        await store.add_memories(create_test_units())
+        stats = await store.get_stats(UID, None)
+        assert stats["active"] == 6 + 2
+
 
 # ---------------------------------------------------------------------------
 # Hierarchical namespace

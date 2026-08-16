@@ -18,7 +18,7 @@ from marklymem.evolver.models import MemoryStatus, MemoryType
 from marklymem.evolver.policy import MemoryPolicy
 from marklymem.evolver.store import MemoryStore
 
-from .conftest import UID, _make_unit
+from .conftest import UID, UID2, _make_unit
 
 FIXED_TS = "2025-01-15T14:00:00+00:00"
 
@@ -417,3 +417,89 @@ class TestConflictResolution:
 
     async def test_resolve_no_conflicts_returns_zero(self, store):
         assert await _manager(store).auto_resolve_conflicts(UID, "test") == {"resolved": 0}
+
+
+# ---------------------------------------------------------------------------
+# clone_namespace
+# ---------------------------------------------------------------------------
+
+class TestCloneNamespace:
+    async def _seed_source(self, store):
+        await store.add_memories([
+            _make_unit(memory_id="s-1", namespace="src", content="alpha fact one"),
+            _make_unit(memory_id="s-2", namespace="src", content="beta fact two"),
+        ])
+
+    async def test_clones_all_active_units(self, store):
+        await self._seed_source(store)
+        result = await _manager(store).clone_namespace(UID, source_namespace="src", target_namespace="dst")
+        assert result["cloned"] == 2
+        assert len(await store.list_active(UID, "dst")) == 2
+
+    async def test_creates_new_ids(self, store):
+        await self._seed_source(store)
+        await _manager(store).clone_namespace(UID, source_namespace="src", target_namespace="dst")
+        source_ids = {u.memory_id for u in await store.list_active(UID, "src")}
+        cloned_ids = {u.memory_id for u in await store.list_active(UID, "dst")}
+        assert source_ids.isdisjoint(cloned_ids)
+
+    async def test_source_unchanged(self, store):
+        await self._seed_source(store)
+        await _manager(store).clone_namespace(UID, source_namespace="src", target_namespace="dst")
+        assert len(await store.list_active(UID, "src")) == 2
+
+    async def test_empty_source_returns_zero(self, store):
+        result = await _manager(store).clone_namespace(UID, source_namespace="nope", target_namespace="dst")
+        assert result["cloned"] == 0
+        assert await store.list_active(UID, "dst") == []
+
+    async def test_does_not_clone_other_user_units(self, store):
+        await store.add_memories([
+            _make_unit(memory_id="mine-1", namespace="src"),
+            _make_unit(memory_id="other-1", namespace="src", user_id=UID2),
+        ])
+        result = await _manager(store).clone_namespace(UID, source_namespace="src", target_namespace="dst")
+        assert result["cloned"] == 1
+        assert await store.list_active(UID2, "dst") == []
+
+
+# ---------------------------------------------------------------------------
+# archive_namespace
+# ---------------------------------------------------------------------------
+
+class TestArchiveNamespace:
+    async def test_archives_non_pinned(self, store):
+        await store.add_memories([
+            _make_unit(memory_id="a-1", namespace="arch", importance=0.5),
+            _make_unit(memory_id="a-2", namespace="arch", importance=0.6),
+        ])
+        result = await _manager(store).archive_namespace(UID, "arch")
+        assert result["archived"] == 2
+        assert result["pinned_kept"] == 0
+        assert result["total_before"] == 2
+        assert await store.list_active(UID, "arch") == []
+
+    async def test_keeps_pinned(self, store):
+        await store.add_memories([
+            _make_unit(memory_id="a-1", namespace="arch", importance=0.5),
+            _make_unit(memory_id="pin-1", namespace="arch", importance=0.99),
+        ])
+        result = await _manager(store).archive_namespace(UID, "arch")
+        assert result["archived"] == 1
+        assert result["pinned_kept"] == 1
+        assert {u.memory_id for u in await store.list_active(UID, "arch")} == {"pin-1"}
+
+    async def test_empty_scope_returns_zero(self, store):
+        result = await _manager(store).archive_namespace(UID, "no-such-scope")
+        assert result["archived"] == 0
+        assert result["total_before"] == 0
+
+    async def test_does_not_affect_other_scope_or_user(self, store):
+        await store.add_memories([
+            _make_unit(memory_id="t-1", namespace="arch"),
+            _make_unit(memory_id="o-1", namespace="keep"),
+            _make_unit(memory_id="u2-1", namespace="arch", user_id=UID2),
+        ])
+        await _manager(store).archive_namespace(UID, "arch")
+        assert {u.memory_id for u in await store.list_active(UID, "keep")} == {"o-1"}
+        assert {u.memory_id for u in await store.list_active(UID2, "arch")} == {"u2-1"}
