@@ -26,6 +26,12 @@ All settings are configured via `.env` (see `.env.example`).
 
 **`pattern`**: per-turn regex/keyword extraction. Fast and deterministic, no API key required. Produces `EPISODIC`, `SEMANTIC`, and `PREFERENCE` units based on keyword matching. Use when extraction latency or API cost is a priority over quality.
 
+## Conflict resolution modes
+
+**`llm`** (default): two-stage pipeline in `evolver/resolver.py`. Stage 1 — cosine recall finds candidate pairs from the active pool above a similarity threshold; falls back to Jaccard (same-type gate) per unit when embeddings are absent. Stage 2 — candidate pairs are chunked into batches of 10 and sent concurrently to OpenAI structured output (`BatchVerdict`) under a semaphore, mirroring the windowed gather pattern in `llm_extractor.py`. Each batch has its own retry loop. CONTRADICTION and DUPLICATE verdicts supersede the older unit. Wired in via `MemoryManager(resolution_mode="llm", resolver=resolver)`.
+
+**`jaccard`**: original token-overlap path (`auto_resolve_conflicts`). Same-type gate, Jaccard ≥ 0.80 threshold. No API key required.
+
 ## Migrations
 
 `evolver/schema.py` (the SQLAlchemy model) is the **single source of truth**. Don't hand-write migration DDL — edit the model, then autogenerate:
@@ -59,7 +65,7 @@ uv run pyright .                  # type check
 
 **Tenant isolation** — every request requires `user_id`. Optional `namespace` narrows to a sub-context. No namespace filter = queries across all namespaces for that user.
 
-**Write pipeline** — `MemoryManager.ingest_session_turns()` → extraction (LLM or pattern) → pre-ingestion dedup against store → local conflict detection → optional embedding → `MemoryStore.add_memories()` → auto-consolidation (dedup + decay) → returns `{added, superseded, decayed, reinforced}`.
+**Write pipeline** — `MemoryManager.ingest_session_turns()` → extraction (LLM or pattern) → pre-ingestion dedup against store → local conflict detection → optional embedding → `MemoryStore.add_memories()` → auto-consolidation (dedup + decay) → conflict resolution (LLM or Jaccard) → returns `{added, superseded, decayed, reinforced}`. `added` reflects units that survived both consolidation and conflict resolution.
 
 **Retrieval** — `MemoryRetriever` dispatches to keyword (Postgres FTS via `websearch_to_tsquery`), embedding (pgvector cosine), or hybrid. Results scored by IDF + importance + recency + reinforcement + type boost + confidence factor.
 
@@ -71,7 +77,7 @@ uv run pyright .                  # type check
 
 Two operations are traced end-to-end:
 
-- **`memory.ingest`**: `extract.session` → per-window `extract.window` generation spans (LLM, tokens) → `embedding` batch span with per-chunk `embedding.chunk` generation spans → `consolidate` span (output = content of superseded memories).
+- **`memory.ingest`**: `extract.session` → per-window `extract.window` generation spans (LLM, tokens) → `embedding` batch span with per-chunk `embedding.chunk` generation spans → `consolidate` span (output = superseded memories) → `resolve` span (output = conflict pairs dropped, when `resolution_mode=llm`, includes per-batch `resolve.verify_batch` generation spans with token usage). Root span output = surviving new memories.
 - **`memory.retrieve`**: `embedding` span (model, token count) → output = retrieved memories with scores and content.
 
 Call sites use `telemetry.trace()` (root), `telemetry.span()` (child), `telemetry.generation()` (LLM/embedding API call). SDK imports are local to `setup_telemetry()` — no hard SDK dep at import time. `setup_telemetry(settings)` is called in the FastAPI lifespan; `shutdown_telemetry()` flushes the batch processor on exit.

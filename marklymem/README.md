@@ -13,7 +13,7 @@ uv run alembic upgrade head
 uv run python run.py
 ```
 
-Server starts at `http://localhost:8100`. Interactive docs at `http://localhost:8100/docs`.
+Server starts at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
 
 ## Endpoints
 
@@ -49,6 +49,13 @@ Set via `ingestion_mode` in `.env`:
 - **`llm`** (default): sliding-window LLM extraction using OpenAI structured outputs. Infers memory type, importance, and confidence per unit. Requires `OPENAI_API_KEY`.
 - **`pattern`**: per-turn regex/keyword extraction. No API key needed. Faster but less precise.
 
+## Conflict resolution
+
+After each ingest, marklymem checks whether newly added memories contradict or duplicate existing ones. Set via `resolution_mode` in `.env`:
+
+- **`llm`** (default): two-stage pipeline — cosine recall finds candidate pairs above a similarity threshold (0.65), then a batched LLM call (OpenAI structured output, up to 10 pairs per call) issues a `CONTRADICTION` / `DUPLICATE` / `INDEPENDENT` verdict for each. Contradictions and duplicates supersede the older unit. Falls back to Jaccard recall when embeddings are unavailable. Requires `OPENAI_API_KEY`.
+- **`jaccard`**: token-overlap heuristic with a same-type gate. No API key needed. Less precise — misses cross-type contradictions and pairs with low surface overlap.
+
 ## Memory types
 
 | Type                     | Description                                   |
@@ -64,7 +71,7 @@ marklymem traces memory operations to a self-hosted [Langfuse](https://langfuse.
 
 Each operation emits one trace:
 
-- **`memory.ingest`** — extraction (`extract.session` → per-window `extract.window` generation spans with token usage) → `embedding` batch span with per-chunk `embedding.chunk` generation spans → `consolidate` span (output: content of every superseded memory).
+- **`memory.ingest`** — extraction (`extract.session` → per-window `extract.window` generation spans with token usage) → `embedding` batch span → `consolidate` span (output: superseded memories) → `resolve` span (output: conflicting pairs dropped, when `resolution_mode=llm`). The root span output is the final set of surviving new memories.
 - **`memory.retrieve`** — `embedding` span (model, token count) → output: retrieved memories with scores and content.
 
 Traces carry `session_id`, `user_id`, and `namespace` so every operation can be correlated to its originating conversation in the Langfuse session view. Content capture (dialogue, memory text, retrieved hits) is always on when tracing is enabled — use a self-hosted Langfuse instance for data residency requirements.
@@ -77,10 +84,11 @@ Traces carry `session_id`, `user_id`, and `namespace` so every operation can be 
 | `OPENAI_API_KEY`         | `""`                     | Required for `ingestion_mode=llm` or `embedder_mode=semantic` |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model                                               |
 | `ingestion_mode`         | `llm`                    | `"llm"` or `"pattern"`                                        |
+| `resolution_mode`        | `llm`                    | `"llm"` or `"jaccard"`                                        |
 | `retrieval_mode`         | `hybrid`                 | `"keyword"`, `"embedding"`, `"hybrid"`, or `"auto"`           |
 | `embedder_mode`          | `semantic`               | `"semantic"` (OpenAI) or `"hashing"` (no API key)             |
 | `FASTAPI_HOST`           | `localhost`              | Bind address                                                  |
-| `FASTAPI_PORT`           | `8100`                   | Bind port                                                     |
+| `FASTAPI_PORT`           | `8000`                   | Bind port                                                     |
 | `OTEL_ENABLED`           | `false`                  | Enable OTel tracing to Langfuse                               |
 | `LANGFUSE_HOST`          | `""`                     | Langfuse base URL, e.g. `http://localhost:3000`               |
 | `LANGFUSE_PUBLIC_KEY`    | `""`                     | Langfuse project public key                                   |
