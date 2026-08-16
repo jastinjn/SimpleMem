@@ -18,21 +18,15 @@ class ScopedRequest(BaseModel):
     scope_id: str | None = Field(None, description="Optional sub-context within the user")
 
 
-class AddRequest(ScopedRequest):
-    session_id: str | None = Field(None, description="Groups turns from the same conversation")
-    prompt_text: str = Field("", description="User side of the turn")
-    response_text: str = Field("", description="Assistant side of the turn")
-
-    @model_validator(mode="after")
-    def _at_least_one_side(self) -> "AddRequest":
-        if not self.prompt_text.strip() and not self.response_text.strip():
-            raise ValueError("at least one of prompt_text or response_text must be non-empty")
-        return self
-
-
 class TurnIn(BaseModel):
     prompt_text: str = ""
     response_text: str = ""
+
+    @model_validator(mode="after")
+    def _at_least_one_side(self) -> "TurnIn":
+        if not self.prompt_text.strip() and not self.response_text.strip():
+            raise ValueError("at least one of prompt_text or response_text must be non-empty")
+        return self
 
 
 class AddBatchRequest(ScopedRequest):

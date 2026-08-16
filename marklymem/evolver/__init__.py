@@ -1,7 +1,7 @@
 """
-EvolveMem — Self-Evolving Memory Architecture for LLM Agents.
+MarklyMem — Memory Architecture for Markly.
 
-A typed memory system with hybrid retrieval and automatic consolidation,
+A typed memory system based on SimpleMem with hybrid retrieval and automatic consolidation,
 backed by PostgreSQL + pgvector.
 """
 

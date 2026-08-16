@@ -27,7 +27,7 @@ class TestAddMemories:
 
     async def test_returns_count(self, store):
         n = await store.add_memories(create_test_units())
-        assert n == 6
+        assert n == 9  # 6 primary + 2 secondary-scope + 1 secondary-user
 
     async def test_upsert_on_same_memory_id(self, store):
         u = _make_unit(memory_id="x-001", content="original")

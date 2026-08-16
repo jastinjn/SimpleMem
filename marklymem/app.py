@@ -26,7 +26,6 @@ from marklymem.evolver.store import MemoryStore
 from .config import get_settings
 from .models import (
     AddBatchRequest,
-    AddRequest,
     AddResponse,
     ClearResponse,
     MemoryHit,
@@ -159,25 +158,6 @@ def _mgr(app: FastAPI) -> MemoryManager:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
-
-
-@router.post("/memory/add", response_model=AddResponse)
-async def memory_add(req: AddRequest, request: Request) -> AddResponse:
-    """Ingest a single dialogue turn into the caller's scope."""
-    _set_request_context(request, req)
-    result = await _mgr(app).ingest_session_turns(
-        req.session_id,
-        [{"prompt_text": req.prompt_text, "response_text": req.response_text}],
-        user_id=req.user_id,
-        scope_id=req.scope_id,
-    )
-    return AddResponse(
-        user_id=req.user_id,
-        scope_id=req.scope_id,
-        session_id=req.session_id,
-        units_added=result["added"],
-        units_consolidated=result["superseded"],
-    )
 
 
 @router.post("/memory/add_batch", response_model=AddResponse)

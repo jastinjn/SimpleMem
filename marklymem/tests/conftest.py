@@ -16,14 +16,9 @@ from marklymem.app import app
 from marklymem.config import Settings
 from marklymem.evolver.manager import MemoryManager
 from marklymem.evolver.store import MemoryStore
-from marklymem.evolver.tests.conftest import create_test_units
+from marklymem.tests.utils.db import create_test_units
 
 TEST_API_KEY = secrets.token_hex(32)
-
-USER_ID = "user-alice"
-SCOPE = "alice"
-OTHER_SCOPE = "bob"
-CORPUS_SIZE = 6  # len(create_test_units())
 
 
 def _non_local_settings() -> Settings:
@@ -43,7 +38,7 @@ async def app_state(test_sm, monkeypatch):
     store = MemoryStore(test_sm)
     app.state.store = store
     app.state.mgr = MemoryManager(store=store, retrieval_mode="keyword", auto_consolidate=True)
-    await store.add_memories(create_test_units(user_id=USER_ID, scope_id=SCOPE))
+    await store.add_memories(create_test_units())
     yield store
 
 
