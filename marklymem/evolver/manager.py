@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import uuid
@@ -147,12 +146,12 @@ class MemoryManager:
                 session_id=session_id,
             )
         else:
-            async def _extract_turn(idx: int, turn: dict) -> list[MemoryUnit]:
+            for idx, turn in enumerate(turns, start=1):
                 prompt_text = str(turn.get("prompt_text", "") or "").strip()
                 response_text = str(turn.get("response_text", "") or "").strip()
                 if not prompt_text and not response_text:
-                    return []
-                extracted = await _extract_memory_units_for_turn(
+                    continue
+                extracted = _extract_memory_units_for_turn(
                     user_id=uid,
                     namespace=ns,
                     session_id=session_id,
@@ -166,12 +165,6 @@ class MemoryManager:
                         idx, len(turns), len(extracted),
                         ", ".join(u.memory_type.value for u in extracted),
                     )
-                return extracted
-
-            results = await asyncio.gather(
-                *(_extract_turn(idx, turn) for idx, turn in enumerate(turns, start=1))
-            )
-            for extracted in results:
                 units.extend(extracted)
 
         # Stamp user_id on all extracted units.
@@ -3510,7 +3503,7 @@ def _infer_memory_type(prompt_text: str, response_text: str) -> MemoryType:
     return MemoryType.EPISODIC
 
 
-async def _extract_memory_units_for_turn(
+def _extract_memory_units_for_turn(
     user_id: str,
     namespace: str,
     session_id: str | None,
