@@ -13,7 +13,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from marklymem.evolver.db import build_engine, build_sessionmaker
@@ -23,8 +23,9 @@ from marklymem.evolver.manager import MemoryManager
 from marklymem.evolver.models import MemoryQuery
 from marklymem.evolver.store import MemoryStore
 
-from . import telemetry
+from .utils import telemetry
 from .config import get_settings
+from .utils.auth import verify_internal_api_key
 from .models import (
     AddBatchRequest,
     AddRequest,
@@ -63,6 +64,12 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "ingestion_mode=llm requires OPENAI_API_KEY to be set in .env"
             )
+
+    if settings.APP_ENV != "local":
+        if not settings.INTERNAL_API_KEY:
+            raise RuntimeError("INTERNAL_API_KEY must be set when APP_ENV is not 'local'")
+        if len(settings.INTERNAL_API_KEY) < 32:
+            raise RuntimeError("INTERNAL_API_KEY must be at least 32 characters")
 
     mgr = MemoryManager(
         store=store,
@@ -122,7 +129,7 @@ def _set_request_context(request: Request, req: ScopedRequest) -> None:
     request.state.scope_id = req.scope_id
 
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(verify_internal_api_key)])
 
 
 @app.middleware("http")

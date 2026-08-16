@@ -6,7 +6,7 @@ import logging
 import math
 from abc import ABC, abstractmethod
 
-from marklymem import telemetry
+from marklymem.utils import telemetry
 
 logger = logging.getLogger(__name__)
 

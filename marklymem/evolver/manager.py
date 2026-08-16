@@ -6,7 +6,7 @@ import re
 import uuid
 from collections.abc import Callable
 
-from marklymem import telemetry
+from marklymem.utils import telemetry
 
 from .consolidator import MemoryConsolidator
 from .embeddings import BaseEmbedder, create_embedder

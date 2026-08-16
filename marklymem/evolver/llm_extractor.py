@@ -29,7 +29,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from marklymem import telemetry
+from marklymem.utils import telemetry
 
 from .models import MemoryType, MemoryUnit
 

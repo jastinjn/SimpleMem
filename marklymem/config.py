@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,10 @@ class Settings(BaseSettings):
     default_top_k: int = 10
     cors_allowed_origins: str = "*"
     OPENAI_API_KEY: str = ""
+
+    # Service-to-service auth
+    APP_ENV: str = "local"       # set to "production" (or anything non-"local") in AWS
+    INTERNAL_API_KEY: str = ""   # generate with: python -c "import secrets; print(secrets.token_hex(32))"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # OpenTelemetry → self-hosted Langfuse (OTLP/HTTP). Tracing is off unless
@@ -29,6 +35,11 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def _strip_internal_api_key_from_env(self) -> Settings:
+        os.environ.pop("INTERNAL_API_KEY", None)
+        return self
 
 @lru_cache
 def get_settings() -> Settings:

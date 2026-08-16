@@ -4,7 +4,7 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from marklymem import telemetry
+from marklymem.utils import telemetry
 
 from .models import MemoryUnit, utc_now_iso
 from .store import MemoryStore
