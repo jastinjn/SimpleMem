@@ -1588,14 +1588,16 @@ class MemoryManager:
             "importance_delta": round(unit_a.importance - unit_b.importance, 4),
         }
 
-    async def clone_scope(self, source_scope: str, target_scope: str) -> dict:
+    async def clone_scope(
+        self, user_id: str, *, source_scope: str, target_scope: str
+    ) -> dict:
         """Deep-clone a scope: copies all active memories with full metadata.
 
         Unlike merge_scopes, this creates fresh copies with new IDs.
         """
         import uuid
 
-        source_units = await self.store.list_active(self.user_id, source_scope, limit=5000)
+        source_units = await self.store.list_active(user_id, source_scope, limit=5000)
         if not source_units:
             return {"cloned": 0, "source_scope": source_scope, "target_scope": target_scope}
 

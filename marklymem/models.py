@@ -40,6 +40,12 @@ class RetrieveRequest(ScopedRequest):
     top_k: int = Field(10, ge=1, le=100)
 
 
+class CloneScopeRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    source_scope: str = Field(..., min_length=1)
+    target_scope: str = Field(..., min_length=1)
+
+
 
 # --------------------------------------------------------------------------- #
 # Responses
@@ -89,3 +95,10 @@ class StatsResponse(BaseModel):
     active_by_type: dict[str, int]
     type_count: int
     dominant_type: str
+
+
+class CloneScopeResponse(BaseModel):
+    user_id: str
+    source_scope: str
+    target_scope: str
+    cloned: int

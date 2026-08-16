@@ -213,3 +213,72 @@ class TestMemoryStats:
         # OTHER_USER's units must not appear in USER_ID's no-scope total.
         body = (await authed_client.post("/api/memory/stats", json={"user_id": USER_ID})).json()
         assert body["entry_count"] == CORPUS_SIZE + OTHER_SCOPE_SIZE
+
+
+class TestCloneScope:
+    CLONE_TARGET = "clone-target"
+
+    async def test_missing_key_returns_403(self, unauthed_client):
+        r = await unauthed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": OTHER_SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        assert r.status_code == 403
+
+    async def test_missing_user_id_is_422(self, authed_client):
+        r = await authed_client.post("/api/memory/clone_scope", json={
+            "source_scope": OTHER_SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        assert r.status_code == 422
+
+    async def test_missing_source_scope_is_422(self, authed_client):
+        r = await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "target_scope": self.CLONE_TARGET,
+        })
+        assert r.status_code == 422
+
+    async def test_missing_target_scope_is_422(self, authed_client):
+        r = await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": OTHER_SCOPE,
+        })
+        assert r.status_code == 422
+
+    async def test_clones_memories_to_target_scope(self, authed_client, app_state):
+        r = await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": OTHER_SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["cloned"] == OTHER_SCOPE_SIZE
+        assert body["user_id"] == USER_ID
+        assert body["source_scope"] == OTHER_SCOPE
+        assert body["target_scope"] == self.CLONE_TARGET
+        cloned = await app_state.list_active(USER_ID, self.CLONE_TARGET)
+        assert len(cloned) == OTHER_SCOPE_SIZE
+
+    async def test_source_scope_unchanged_after_clone(self, authed_client, app_state):
+        await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": OTHER_SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        assert len(await app_state.list_active(USER_ID, OTHER_SCOPE)) == OTHER_SCOPE_SIZE
+
+    async def test_clone_creates_new_ids(self, authed_client, app_state):
+        await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": OTHER_SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        source_ids = {u.memory_id for u in await app_state.list_active(USER_ID, OTHER_SCOPE)}
+        cloned_ids = {u.memory_id for u in await app_state.list_active(USER_ID, self.CLONE_TARGET)}
+        assert source_ids.isdisjoint(cloned_ids)
+
+    async def test_empty_source_scope_returns_zero_cloned(self, authed_client):
+        r = await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": "no-such-scope", "target_scope": self.CLONE_TARGET,
+        })
+        assert r.status_code == 200
+        assert r.json()["cloned"] == 0
+
+    async def test_does_not_clone_other_user_memories(self, authed_client, app_state):
+        # Cloning USER_ID's scope must not touch OTHER_USER's units.
+        await authed_client.post("/api/memory/clone_scope", json={
+            "user_id": USER_ID, "source_scope": SCOPE, "target_scope": self.CLONE_TARGET,
+        })
+        assert len(await app_state.list_active(OTHER_USER, SCOPE)) == OTHER_USER_SIZE

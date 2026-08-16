@@ -26,7 +26,7 @@ def main() -> None:
     print("=" * 60)
     print("  SimpleMem Evolver API")
     print(f"  http://{args.host}:{args.port}")
-    print("  Routes: POST /memory/{add_dialogue,retrieve,clear,stats}")
+    print("  Routes: POST /memory/{add_dialogue,retrieve,clear,stats,clone_scope}")
     print("          GET  /health   |   docs: /docs")
     print("=" * 60)
 

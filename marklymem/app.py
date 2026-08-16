@@ -28,6 +28,8 @@ from .models import (
     AddDialogueRequest,
     AddResponse,
     ClearResponse,
+    CloneScopeRequest,
+    CloneScopeResponse,
     MemoryHit,
     RetrieveRequest,
     RetrieveResponse,
@@ -225,6 +227,23 @@ async def memory_clear(req: ScopedRequest, request: Request) -> ClearResponse:
         archived=int(result.get("archived", 0)),
         pinned_kept=int(result.get("pinned_kept", 0)),
         total_before=int(result.get("total_before", 0)),
+    )
+
+
+@router.post("/memory/clone_scope", response_model=CloneScopeResponse)
+async def memory_clone_scope(req: CloneScopeRequest, request: Request) -> CloneScopeResponse:
+    """Clone all active memories from one scope into another (new IDs, originals untouched)."""
+    request.state.user_id = req.user_id
+    result = await _mgr(app).clone_scope(
+        req.user_id,
+        source_scope=req.source_scope,
+        target_scope=req.target_scope,
+    )
+    return CloneScopeResponse(
+        user_id=req.user_id,
+        source_scope=req.source_scope,
+        target_scope=req.target_scope,
+        cloned=result["cloned"],
     )
 
 
