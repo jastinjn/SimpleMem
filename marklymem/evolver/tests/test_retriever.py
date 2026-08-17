@@ -203,34 +203,6 @@ class TestAutoMode:
 # Tag boost
 # ---------------------------------------------------------------------------
 
-class TestTagBoost:
-    async def test_tag_matching_boosts_score(self, store):
-        await store.add_memories(create_test_units())
-        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
-        hits_no_tags = await r.retrieve(_query("the"))
-        hits_db_tag = await r.retrieve(_query("the", context_tags=["db"]))
-        score_no_tag = next((h.score for h in hits_no_tags if h.unit.memory_id == "unit-001"), None)
-        score_with_tag = next((h.score for h in hits_db_tag if h.unit.memory_id == "unit-001"), None)
-        if score_no_tag is not None and score_with_tag is not None:
-            assert score_with_tag > score_no_tag
-
-    async def test_boost_capped_at_50_percent(self, store):
-        u = _make_unit(
-            memory_id="tag-001", namespace="tagtest",
-            content="database authentication",
-            tags=["t1", "t2", "t3", "t4", "t5"],
-            updated_at="2025-01-01T00:00:01+00:00",
-        )
-        await store.add_memories([u])
-        r = MemoryRetriever(store, policy=_policy(), retrieval_mode="keyword")
-        hits_no_boost = await r.retrieve(_query("database", namespace="tagtest"))
-        hits_boosted = await r.retrieve(_query("database", namespace="tagtest",
-                                               context_tags=["t1", "t2", "t3", "t4", "t5", "t6"]))
-        if hits_no_boost and hits_boosted:
-            ratio = hits_boosted[0].score / hits_no_boost[0].score
-            assert ratio == pytest.approx(1.5, abs=0.01)
-
-
 # ---------------------------------------------------------------------------
 # Recency bonus (monkeypatched)
 # ---------------------------------------------------------------------------

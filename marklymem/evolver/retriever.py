@@ -58,9 +58,6 @@ class MemoryRetriever:
                     query_text=query.query_text,
                     limit=limit,
                 )
-                # Apply tag-based boosting if context tags are provided.
-                if query.context_tags:
-                    hits = _apply_tag_boost(hits, query.context_tags)
                 logger.info(
                     "[Retriever] mode=keyword namespace=%s hits=%d",
                     query.namespace, len(hits),
@@ -188,8 +185,6 @@ class MemoryRetriever:
 
         hits.sort(key=lambda hit: (hit.score, hit.unit.updated_at), reverse=True)
         hits = hits[: min(query.top_k, self.policy.max_injected_units)]
-        if query.context_tags:
-            hits = _apply_tag_boost(hits, query.context_tags)
         return hits
 
     async def _retrieve_embedding(self, query: MemoryQuery) -> list[MemorySearchHit]:
@@ -220,27 +215,7 @@ class MemoryRetriever:
 
         hits.sort(key=lambda hit: (hit.score, hit.unit.updated_at), reverse=True)
         hits = hits[: min(query.top_k, self.policy.max_injected_units)]
-        if query.context_tags:
-            hits = _apply_tag_boost(hits, query.context_tags)
         return hits
-
-
-def _apply_tag_boost(hits: list[MemorySearchHit], context_tags: list[str]) -> list[MemorySearchHit]:
-    """Boost scores for memories whose tags overlap with the query's context tags.
-
-    Each matching tag adds a 15% boost, capped at 50% total. Re-sorts after boosting.
-    """
-    if not context_tags:
-        return hits
-    tag_set = set(t.lower() for t in context_tags)
-    for hit in hits:
-        unit_tags = set(t.lower() for t in hit.unit.tags)
-        overlap = len(tag_set & unit_tags)
-        if overlap:
-            boost = min(0.15 * overlap, 0.5)
-            hit.score *= 1.0 + boost
-    hits.sort(key=lambda h: (h.score, h.unit.updated_at), reverse=True)
-    return hits
 
 
 def _log2(x: float) -> float:

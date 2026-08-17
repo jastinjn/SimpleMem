@@ -59,7 +59,6 @@ class MemoryQuery:
     top_k: int = 6
     max_tokens: int = 800
     include_types: list[MemoryType] = field(default_factory=list)
-    context_tags: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+
+# Environment
+.env
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build / dist
+dist/
+build/
+*.egg-info/
+
+# DB data
+lancedb_data/
+*.db
+*.sqlite
+
+# macOS
+.DS_Store

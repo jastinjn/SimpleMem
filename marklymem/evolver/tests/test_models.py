@@ -66,7 +66,6 @@ class TestMemoryQuery:
         assert q.top_k == 6
         assert q.max_tokens == 800
         assert q.include_types == []
-        assert q.context_tags == []
 
     def test_custom_values(self):
         q = MemoryQuery(user_id="user-test", namespace="s", query_text="x", top_k=3, max_tokens=200)
